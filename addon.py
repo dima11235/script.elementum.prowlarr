@@ -14,7 +14,7 @@ ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
 ADDON_NAME = 'Elementum Prowlarr'
 PROGRESS_MESSAGES = {'indexers': 32065, 'cooldown': 32072, 'requests': 32074,
                      'indexer_results': 32066, 'filtering': 32075, 'links': 32068,
-                     'sorting': 32076}
+                     'links_done': 32077, 'sorting': 32076}
 # Elementum re-invokes the provider several times for one item; a short-lived
 # cache keeps those repeats from hammering trackers that rate-limit requests.
 CACHE_TTL_SECONDS = 150

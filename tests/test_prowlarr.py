@@ -124,6 +124,7 @@ class ProwlarrTests(unittest.TestCase):
             (80, 'requests', '2/2', ''),
             (82, 'filtering'),
             (95, 'links', 0, 0),
+            (95, 'links_done', 0, 0),
             (97, 'sorting'),
         ], events)
 
@@ -330,6 +331,24 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual('RuTracker.org, 1337x', result[0]['provider'])
         self.assertEqual(12, result[0]['seeds'])
         self.assertEqual(20, result[0]['peers'])
+
+    def test_failed_links_are_returned_as_last_resort(self):
+        client, _ = self.client()
+        ru = {'name': 'Movie 1080p WEB-DL', 'provider': 'RuTracker.org', 'seeds': 5, 'peers': 7,
+              'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
+              'resolution': 3, 'release_type': 8, 'category': 'web',
+              'uri': '/base/21/download?link=token-one'}
+        other = {**ru, 'provider': '1337x', 'seeds': 3, 'name': 'Movie 1080p WEB-Rip',
+                 'uri': '/base/21/download?link=token-two'}
+        pool = Mock()
+        pool.map = lambda function, batch: [None for _ in batch]
+        events = []
+        result = client._resolve_results(pool, [ru, other], limit=10,
+                                         progress=lambda *args: events.append(args))
+        self.assertEqual(['/base/21/download?link=token-one',
+                          '/base/21/download?link=token-two'],
+                         [item['uri'] for item in result])
+        self.assertEqual((95, 'links_done', 0, 2), events[-1])
 
     def test_no_enabled_indexer_is_reported(self):
         client = api.Client('http://prowlarr.example', 'synthetic', transport=Mock(return_value=[]))

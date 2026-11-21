@@ -191,6 +191,10 @@ msgctxt "#32076"
 msgid "Sorting…"
 msgstr "Sorting…"
 
+msgctxt "#32077"
+msgid "Links checked: {}/{}"
+msgstr "Links checked: {}/{}"
+
 msgctxt "#32072"
 msgid "Paused by trackers: {}"
 msgstr "Paused by trackers: {}"

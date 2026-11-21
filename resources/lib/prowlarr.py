@@ -644,6 +644,13 @@ class Client:
                     continue
                 identities.add(identity)
                 results.append({**result, 'uri': uri, 'info_hash': digest})
+        if progress is not None:
+            progress(95, 'links_done', len(results), min(len(rows), limit))
+        if not results and rows:
+            # Last resort: when every verified link failed (a throttled tracker
+            # rejects the download), still hand the unverified proxy links to
+            # Elementum - some may play later; empty results hide the search.
+            return rows[:limit]
         return results[:limit]
 
     @staticmethod

@@ -191,6 +191,10 @@ msgctxt "#32076"
 msgid "Sorting…"
 msgstr "Сортирую…"
 
+msgctxt "#32077"
+msgid "Links checked: {}/{}"
+msgstr "Проверено ссылок: {}/{}"
+
 msgctxt "#32072"
 msgid "Paused by trackers: {}"
 msgstr "Трекеры в паузе: {}"
