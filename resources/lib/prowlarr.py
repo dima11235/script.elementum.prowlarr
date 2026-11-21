@@ -391,6 +391,10 @@ class Client:
             raise ProwlarrError('No enabled torrent indexers available; check Prowlarr and indexer cooldowns')
         return self._indexers
 
+    def cooldowns(self):
+        """Formatted list of torrent indexers currently in tracker cooldown."""
+        return list(self._cooldowns)
+
     def is_download_proxy(self, target):
         base = urlsplit(self.base)
         if (target.scheme, target.netloc) != (base.scheme, base.netloc):

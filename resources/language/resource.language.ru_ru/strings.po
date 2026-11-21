@@ -195,6 +195,10 @@ msgctxt "#32077"
 msgid "Links checked: {}/{}"
 msgstr "Проверено ссылок: {}/{}"
 
+msgctxt "#32078"
+msgid "Indexers paused: {}"
+msgstr "Индексаторы в паузе: {}"
+
 msgctxt "#32072"
 msgid "Paused by trackers: {}"
 msgstr "Трекеры в паузе: {}"

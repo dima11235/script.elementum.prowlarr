@@ -141,6 +141,7 @@ class ProwlarrTests(unittest.TestCase):
             with patch.object(sys, 'path', sys.path[:]):
                 addon = load('addon_tested_cache', ROOT / 'addon.py')
         client = Mock()
+        client.cooldowns.return_value = []
         client.search_media.return_value = [{'name': 'Movie'}]
         clock = Mock(return_value=100.0)
         with patch.object(addon, 'client', return_value=client), \
@@ -171,6 +172,7 @@ class ProwlarrTests(unittest.TestCase):
             with patch.object(sys, 'path', sys.path[:]):
                 addon = load('addon_tested_empty', ROOT / 'addon.py')
         client = Mock()
+        client.cooldowns.return_value = []
         client.search_media.return_value = []
         with patch.object(addon, 'client', return_value=client):
             self.assertEqual([], addon.search('Movie'))
@@ -195,20 +197,50 @@ class ProwlarrTests(unittest.TestCase):
             return [{'name': 'Movie'}]
 
         client = Mock()
+        client.cooldowns.return_value = []
         with patch.object(addon, 'client', return_value=client):
             client.search_media.side_effect = search_media
             self.assertEqual([{'name': 'Movie'}], addon.search('Movie A'))
-            gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
+            gui.DialogProgressBG.return_value.update.assert_called_once_with(
+                5, heading='Elementum Prowlarr', message='Checking: Tracker')
             gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = api.ProwlarrError('Unavailable')
             self.assertEqual([], addon.search('Movie B'))
             gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = RuntimeError
             self.assertEqual([], addon.search('Movie C'))
-            gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
+            gui.DialogProgressBG.return_value.update.assert_called_with(
+                5, heading='Elementum Prowlarr', message='Checking: Tracker')
+            gui.Dialog.return_value.notification.assert_not_called()
             gui.Dialog.return_value.notification.assert_not_called()
         self.assertEqual(3, gui.DialogProgressBG.return_value.close.call_count)
         gui.Dialog.return_value.notification.assert_not_called()
+
+    def test_all_paused_indexers_keep_window_with_explanation(self):
+        gui = Mock()
+        xbmc_mock = Mock()
+        settings = Mock()
+        settings.getSettingInt.return_value = 0
+        settings.getSetting.return_value = ''
+        settings.getSettingBool.return_value = False
+        settings.getLocalizedString.side_effect = {32064: 'Starting', 32078: 'Paused: {}'}.get
+        addon_api = Mock()
+        addon_api.Addon.return_value = settings
+        with patch.dict(sys.modules, {'xbmc': xbmc_mock, 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}):
+            with patch.object(sys, 'path', sys.path[:]):
+                addon = load('addon_tested_paused', ROOT / 'addon.py')
+        client = Mock()
+        client.indexers.side_effect = api.ProwlarrError('No enabled torrent indexers available')
+        client.cooldowns.return_value = ['RuTracker.org 12:31', '1337x 12:45']
+        with patch.object(addon, 'client', return_value=client):
+            self.assertEqual([], addon.search('Movie'))
+        gui.DialogProgressBG.return_value.update.assert_called_once_with(
+            100,
+            heading='Elementum Prowlarr | Paused: RuTracker.org 12:31, 1337x 12:45',
+            message='Paused: RuTracker.org 12:31, 1337x 12:45')
+        gui.Dialog.return_value.notification.assert_not_called()
+        xbmc_mock.sleep.assert_called_once_with(3000)
+        client.search_media.assert_not_called()
 
     def test_torznab_movie_uses_typed_year_when_available(self):
         movie = ('Movie', 2001, None, None)

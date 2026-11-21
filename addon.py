@@ -63,9 +63,6 @@ def included(mapping):
 def search(payload, kind='search'):
     progress = xbmcgui.DialogProgressBG()
 
-    def update(percent, event, *args):
-        progress.update(percent, message=localize(PROGRESS_MESSAGES[event]).format(*args))
-
     try:
         progress.create(ADDON_NAME, localize(32064))
         language = xbmc.getLanguage(xbmc.ISO_639_1) if ADDON.getSettingBool('localized_titles') else ''
@@ -78,8 +75,27 @@ def search(payload, kind='search'):
             progress.update(100, message=localize(32073).format(len(cached[1])))
             xbmc.log(f'Elementum Prowlarr: served {len(cached[1])} cached results', xbmc.LOGINFO)
             return list(cached[1])
+        prowlarr = client()
+        try:
+            prowlarr.indexers()
+        except ProwlarrError as error:
+            # Every torrent indexer paused or unavailable: keep the window on
+            # screen long enough to explain the empty result.
+            xbmc.log(f'Elementum Prowlarr: {error}', xbmc.LOGWARNING)
+            pause = ', '.join(prowlarr.cooldowns())
+            heading = f'{ADDON_NAME} | {localize(32078).format(pause)}' if pause else ADDON_NAME
+            message = localize(32078).format(pause) if pause else localize(32064)
+            progress.update(100, heading=heading, message=message)
+            xbmc.sleep(3000)
+            return []
+        pause = ', '.join(prowlarr.cooldowns())
+        heading = f'{ADDON_NAME} | {localize(32078).format(pause)}' if pause else ADDON_NAME
+
+        def update(percent, event, *args):
+            progress.update(percent, heading=heading, message=localize(PROGRESS_MESSAGES[event]).format(*args))
+
         allow_season_pack = ADDON.getSettingBool('season_fallback')
-        results = client().search_media(
+        results = prowlarr.search_media(
             payload, kind=kind, language=language, limit=ADDON.getSettingInt('max_results'),
             progress=update,
             min_seeders=ADDON.getSettingInt('min_seeders'),
