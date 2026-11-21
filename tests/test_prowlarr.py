@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from time import monotonic
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -350,9 +352,8 @@ class ProwlarrTests(unittest.TestCase):
         two = {**base, 'uri': '/base/21/download?link=two'}
         different = {**base, 'name': 'Movie 720p HDTV', '_size_bytes': 700 * 1024 ** 2,
                      'uri': '/base/21/download?link=three'}
-        pool = Mock()
-        pool.map = lambda function, batch: [function(item) for item in batch]
-        result = client._resolve_results(pool, [base, two, different], limit=10)
+        with ThreadPoolExecutor() as pool:
+            result = client._resolve_results(pool, [base, two, different], limit=10)
         self.assertEqual(3, len(result))
 
     def test_different_hashes_with_same_name_and_size_remain_separate(self):
@@ -363,9 +364,8 @@ class ProwlarrTests(unittest.TestCase):
                 'uri': 'magnet:?xt=urn:btih:' + 'a' * 40}
         other = {**base, 'provider': '1337x', 'seeds': 12, 'peers': 20,
                  'uri': 'magnet:?xt=urn:btih:' + 'b' * 40}
-        pool = Mock()
-        pool.map = lambda function, batch: [function(item) for item in batch]
-        result = client._resolve_results(pool, [base, other], limit=10)
+        with ThreadPoolExecutor() as pool:
+            result = client._resolve_results(pool, [base, other], limit=10)
         self.assertEqual(['RuTracker.org', '1337x'], [item['provider'] for item in result])
 
     def test_failed_links_are_returned_as_last_resort(self):
@@ -376,15 +376,69 @@ class ProwlarrTests(unittest.TestCase):
               'uri': '/base/21/download?link=token-one'}
         other = {**ru, 'provider': '1337x', 'seeds': 3, 'name': 'Movie 1080p WEB-Rip',
                  'uri': '/base/21/download?link=token-two'}
-        pool = Mock()
-        pool.map = lambda function, batch: [None for _ in batch]
         events = []
-        result = client._resolve_results(pool, [ru, other], limit=10,
-                                         progress=lambda *args: events.append(args))
+        with ThreadPoolExecutor() as pool, patch.object(client, 'resolve_proxy_magnet', return_value=None):
+            result = client._resolve_results(pool, [ru, other], limit=10,
+                                             progress=lambda *args: events.append(args))
         self.assertEqual(['/base/21/download?link=token-one',
                           '/base/21/download?link=token-two'],
                          [item['uri'] for item in result])
         self.assertEqual((95, 'links_done', 0, 2), events[-1])
+
+    def test_active_indexer_results_survive_missed_search_deadline(self):
+        unblock = Event()
+        searches = []
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+        feed = ElementTree.fromstring(
+            '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>'
+            f'<item><title>Movie</title><link>{magnet}</link>'
+            '<torznab:attr name="seeders" value="5"/></item></channel></rss>'
+        )
+        indexers = [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'Slow'},
+                    {'id': 23, 'enable': True, 'protocol': 'torrent', 'name': 'Fast'}]
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return indexers
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            if '/21/' in endpoint:
+                if not unblock.wait(timeout=3):
+                    raise AssertionError('Provider waited for the slow worker before returning')
+                return feed
+            searches.append(params['q'])
+            return feed
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport,
+                            deadline=monotonic() + 0.8)
+        try:
+            result = client.search_media({'title': 'Movie', 'titles': {'ru': 'Фильм'}}, kind='movie')
+        finally:
+            unblock.set()
+        self.assertEqual([magnet], [item['uri'] for item in result])
+        self.assertEqual(['Movie', 'Фильм'], searches)
+
+    def test_slow_proxy_link_does_not_discard_completed_magnet(self):
+        client, _ = self.client()
+        client.deadline = monotonic() + 0.2
+        unblock = Event()
+        proxy = 'https://prowlarr.example/base/21/download?link=slow'
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+
+        def resolve(uri, _deadline):
+            if uri == proxy:
+                if not unblock.wait(timeout=3):
+                    raise AssertionError('Provider waited for a slow proxy')
+            return uri
+
+        pool = ThreadPoolExecutor()
+        try:
+            with patch.object(client, 'resolve_proxy_magnet', side_effect=resolve):
+                result = client._resolve_results(pool, [{'uri': proxy}, {'uri': magnet}], limit=2)
+            self.assertEqual([magnet], [item['uri'] for item in result])
+        finally:
+            unblock.set()
+            pool.shutdown()
 
     def test_no_enabled_indexer_is_reported(self):
         client = api.Client('http://prowlarr.example', 'synthetic', transport=Mock(return_value=[]))

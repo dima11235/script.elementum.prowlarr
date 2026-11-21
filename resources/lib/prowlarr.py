@@ -3,7 +3,7 @@ import json
 import re
 import socket
 from base64 import b32decode
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, as_completed
 from datetime import datetime, timezone
 from http.client import HTTPException
 from time import monotonic
@@ -47,6 +47,17 @@ RELEASE_CATEGORIES = (
 )
 
 RESOLVE_BUDGET = 10
+
+
+def completed_before(futures, deadline):
+    try:
+        yield from as_completed(futures, timeout=max(0, deadline - monotonic()))
+    except FutureTimeout:
+        pass
+    finally:
+        for future in futures:
+            if not future.done():
+                future.cancel()
 
 
 def release_category(title):
@@ -254,7 +265,7 @@ def torznab_releases(root, indexer):
 
 
 class Client:
-    def __init__(self, host, api_key, timeout=60, transport=None):
+    def __init__(self, host, api_key, timeout=60, transport=None, deadline=None):
         parsed = urlsplit(host.strip())
         if (parsed.scheme not in ('http', 'https') or not parsed.hostname
                 or parsed.username or parsed.password or parsed.query or parsed.fragment):
@@ -264,11 +275,19 @@ class Client:
         self.base = host.strip().rstrip('/') + '/'
         self.api_key = api_key.strip()
         self.timeout = max(5, min(180, integer(timeout, 60)))
+        self.deadline = deadline
         self.transport = transport or self._request
         self._indexers = None
         self._cooldowns = []
 
     def _request(self, endpoint, params=None, timeout=None):
+        timeout = self.timeout if timeout is None else timeout
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline - monotonic())
+            if endpoint in ('api/v1/indexer', 'api/v1/indexerstatus'):
+                timeout = min(timeout, 5)
+            if timeout <= 0:
+                raise ProwlarrError('Prowlarr request timed out')
         torznab = endpoint.endswith('/newznab')
         url = urljoin(self.base, endpoint)
         if params:
@@ -278,7 +297,7 @@ class Client:
         # Do not inherit environment proxies or forward authentication on redirects.
         opener = build_opener(ProxyHandler({}), NoRedirect())
         try:
-            with opener.open(request, timeout=self.timeout if timeout is None else timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 data = response.read(32 * 1024 * 1024 + 1)
                 if len(data) > 32 * 1024 * 1024:
                     raise ProwlarrError('Prowlarr response exceeds 32 MiB')
@@ -460,7 +479,7 @@ class Client:
                    for indexer, name in zip(indexers, names)}
         releases = {}
         errors = {}
-        for completed, result in enumerate(as_completed(pending), 1):
+        for completed, result in enumerate(completed_before(pending, deadline), 1):
             name = pending[result]
             try:
                 releases[result] = result.result()
@@ -473,6 +492,8 @@ class Client:
             progress(completed, 'requests', completed, len(pending), ', '.join(waiting))
         if len(errors) == len(pending):
             raise errors[next(iter(pending))]
+        if not releases:
+            raise ProwlarrError('Prowlarr request timed out')
         # Preserve indexer order for releases with identical sort keys.
         return [release for result in pending for release in releases.get(result, ())]
 
@@ -507,8 +528,13 @@ class Client:
         per_query = len(indexers)
         total = per_query * len(dict.fromkeys((*primary, *fallback)))
         requested = 0
-        search_deadline = monotonic() + self.timeout
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        now = monotonic()
+        search_deadline = now + self.timeout
+        if self.deadline is not None:
+            link_budget = min(5, max(0, self.deadline - now) / 5)
+            search_deadline = min(search_deadline, self.deadline - link_budget)
+        pool = ThreadPoolExecutor(max_workers=6)
+        try:
             def fetch(query):
                 nonlocal requested
 
@@ -536,11 +562,17 @@ class Client:
             rows = self._resolve_results(pool, candidates, self.result_limit(limit), progress)
             progress(97, 'sorting')
             return rows
+        finally:
+            # Running requests have their own socket timeouts. The callback
+            # must be sent without waiting for a slow worker to exit.
+            pool.shutdown(wait=False)
 
     def _resolve_results(self, pool, candidates, limit, progress=None):
         results = []
         identities = set()
         deadline = monotonic() + min(RESOLVE_BUDGET, self.timeout)
+        if self.deadline is not None:
+            deadline = min(deadline, self.deadline)
         bound = min(len(candidates), limit * 2)
         batches = max(1, -(-bound // 6))
         # Bound work by the result limit. Try spare candidates when a proxy fails.
@@ -550,8 +582,10 @@ class Client:
             if progress is not None:
                 progress(85 + 10 * (index + 1) // batches, 'links', len(results), min(bound, limit))
             batch = candidates[index * 6:min((index + 1) * 6, bound)]
-            urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline), batch)
-            for result, uri in zip(batch, urls):
+            pending = [pool.submit(self.resolve_proxy_magnet, result['uri'], deadline) for result in batch]
+            ready = {future: future.result() for future in completed_before(pending, deadline)}
+            for result, future in zip(batch, pending):
+                uri = ready.get(future)
                 if not uri:
                     continue
                 digest = magnet_hash(uri) or result['info_hash']

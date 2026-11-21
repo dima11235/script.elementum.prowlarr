@@ -1,6 +1,7 @@
 """Kodi entry point and Elementum provider callbacks."""
 import os
 import sys
+from time import monotonic
 
 import xbmc
 import xbmcaddon
@@ -29,9 +30,21 @@ def localize(identifier):
     return ADDON.getLocalizedString(identifier)
 
 
-def client():
+def client(deadline=None):
     return Client(ADDON.getSetting('host'), ADDON.getSetting('api_key'),
-                  timeout=ADDON.getSettingInt('timeout'))
+                  timeout=ADDON.getSettingInt('timeout'), deadline=deadline)
+
+
+def callback_deadline():
+    started = monotonic()
+    timeout = 40
+    elementum = xbmcaddon.Addon('plugin.video.elementum')
+    if elementum.getSettingBool('custom_provider_timeout_enabled'):
+        configured = elementum.getSettingInt('custom_provider_timeout')
+        if configured and configured > 0:
+            timeout = configured
+    # Leave time for Kodi to launch the script and Elementum to receive its callback.
+    return started + max(0.5, timeout - 5)
 
 
 def size_range(kind):
@@ -53,7 +66,7 @@ def search(payload, kind='search'):
     try:
         progress.create(ADDON_NAME, localize(32064))
         language = xbmc.getLanguage(xbmc.ISO_639_1) if ADDON.getSettingBool('localized_titles') else ''
-        prowlarr = client()
+        prowlarr = client(deadline=callback_deadline())
         try:
             prowlarr.indexers()
         except ProwlarrError as error:
