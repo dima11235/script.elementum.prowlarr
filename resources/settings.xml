@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+  <category label="32000">
+    <setting id="host" type="text" label="32001" default="http://localhost:9696"/>
+    <setting id="api_key" type="text" label="32002" option="hidden" default=""/>
+    <setting type="action" label="32003" action="RunScript(script.elementum.prowlarr,test)" option="close"/>
+    <setting id="timeout" type="slider" label="32004" default="60" range="5,5,180" option="int"/>
+  </category>
+  <category label="32010">
+    <setting id="max_results" type="slider" label="32011" default="50" range="5,5,200" option="int"/>
+    <setting id="min_seeders" type="number" label="32012" default="1"/>
+    <setting id="sort_by" type="enum" label="32030" lvalues="32031|32032|32033|32034" default="0"/>
+    <setting id="localized_titles" type="bool" label="32014" default="true"/>
+    <setting id="season_fallback" type="bool" label="32015" default="true"/>
+  </category>
+  <category label="32050">
+    <setting id="include_unknown_size" type="bool" label="32040" default="true"/>
+    <setting id="movie_size_min" type="number" label="32041" default="0"/>
+    <setting id="movie_size_max" type="number" label="32042" default="0"/>
+    <setting id="season_size_min" type="number" label="32043" default="0"/>
+    <setting id="season_size_max" type="number" label="32044" default="0"/>
+    <setting id="episode_size_min" type="number" label="32045" default="0"/>
+    <setting id="episode_size_max" type="number" label="32046" default="0"/>
+  </category>
+  <category label="32070">
+    <setting id="require_keywords" type="text" label="32016" default=""/>
+    <setting id="exclude_keywords" type="text" label="32017" default=""/>
+    <setting id="include_resolution_2160" type="bool" label="32051" default="true"/>
+    <setting id="include_resolution_1440" type="bool" label="32052" default="true"/>
+    <setting id="include_resolution_1080p" type="bool" label="32053" default="true"/>
+    <setting id="include_resolution_720p" type="bool" label="32054" default="true"/>
+    <setting id="include_resolution_480p" type="bool" label="32055" default="true"/>
+    <setting id="include_resolution_unknown" type="bool" label="32056" default="true"/>
+    <setting id="include_release_bluray" type="bool" label="32057" default="true"/>
+    <setting id="include_release_web" type="bool" label="32058" default="true"/>
+    <setting id="include_release_hdtv" type="bool" label="32059" default="true"/>
+    <setting id="include_release_dvd" type="bool" label="32060" default="true"/>
+    <setting id="include_release_tvrip" type="bool" label="32061" default="true"/>
+    <setting id="include_release_unknown" type="bool" label="32062" default="true"/>
+    <setting id="include_release_screener" type="bool" label="32063" default="false"/>
+  </category>
+</settings>
