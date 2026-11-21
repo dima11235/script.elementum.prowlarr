@@ -62,9 +62,15 @@ def human_size(size):
         value /= 1024
 
 
-def title_from_payload(payload, language='', kind='search'):
+def search_titles(payload, language='', kind='search'):
+    """Search titles in priority order: localized first, then the alternative.
+
+    RuTracker and other local trackers index localized names while many
+    international trackers only know the English one, so both are searched
+    and the results are merged.
+    """
     if isinstance(payload, str):
-        return payload.strip()
+        return [payload.strip()]
     titles = {str(key).lower(): value for key, value in (payload.get('titles') or {}).items()}
     original = str(payload.get('title') or '').strip()
     if original.isascii():
@@ -73,42 +79,61 @@ def title_from_payload(payload, language='', kind='search'):
         english = titles.get('en') or original
     query = str(payload.get('query') or '').strip()
     localized = str(titles.get(language.lower()) or '').strip() if language else ''
-    if kind == 'search':
-        return (query or localized or english or
-                next(iter(titles.values()), '')).strip()
-    # Movie and TV searches prefer the localized title over the Elementum
-    # query, matching the Jackett addon; trackers like RuTracker index
-    # localized names and return nothing for the query fallback. A non-Latin
-    # original title also beats its English translation there.
     preferred_original = original if original and not original.isascii() else ''
-    return (localized or preferred_original or english or query or
-            next(iter(titles.values()), '')).strip()
+    if kind == 'search':
+        # A general search is the text the user typed: one query, Jackett parity.
+        for value in (query, localized, english, original, next(iter(titles.values()), '')):
+            value = str(value or '').strip()
+            if value:
+                return [value]
+        return []
+    ordered = [localized, preferred_original, english, original, query]
+    unique = []
+    for value in ordered:
+        value = str(value or '').strip()
+        if value and value.casefold() not in {seen.casefold() for seen in unique}:
+            unique.append(value)
+    return unique
+
+
+def title_from_payload(payload, language='', kind='search'):
+    titles = search_titles(payload, language, kind)
+    return titles[0] if titles else ''
 
 
 def search_queries(payload, kind='search', language='', season_fallback=False):
-    title = title_from_payload(payload, language, kind)
-    if not title:
-        return []
-    if isinstance(payload, str) or kind == 'search':
-        return [title]
-    if kind == 'movie':
-        year = integer(payload.get('year'))
-        return [f'{title} {year}' if year else title]
-    season = payload.get('season')
-    if season is None:
-        return [title]
-    season_query = f'{title} S{integer(season):02d}'
-    episode = payload.get('episode')
-    if kind == 'episode' and episode is not None:
-        query = f'{season_query}E{integer(episode):02d}'
-        return [query, season_query] if season_fallback else [query]
-    return [season_query]
+    queries = []
+    for title in search_titles(payload, language, kind):
+        if not title:
+            continue
+        if kind == 'search':
+            queries.append(title)
+        elif kind == 'movie':
+            year = integer(payload.get('year'))
+            queries.append(f'{title} {year}' if year else title)
+        else:
+            season = payload.get('season')
+            if season is None:
+                queries.append(title)
+                continue
+            season_query = f'{title} S{integer(season):02d}'
+            episode = payload.get('episode')
+            if kind == 'episode' and episode is not None:
+                queries.append(f'{season_query}E{integer(episode):02d}')
+                if season_fallback:
+                    queries.append(season_query)
+            else:
+                queries.append(season_query)
+    return list(dict.fromkeys(queries))
 
 
 def tv_fallback_queries(payload, language, kind='episode'):
-    title = title_from_payload(payload, language, kind)
-    years = dict.fromkeys(integer(payload.get(key)) for key in ('year', 'season_year', 'show_year'))
-    return [f'{title} {year}' for year in years if year] + [title]
+    queries = []
+    for title in search_titles(payload, language, kind):
+        years = dict.fromkeys(integer(payload.get(key)) for key in ('year', 'season_year', 'show_year'))
+        queries.extend(f'{title} {year}' for year in years if year)
+        queries.append(title)
+    return list(dict.fromkeys(queries))
 
 
 SEASON_MARKER = re.compile(
@@ -417,21 +442,23 @@ class Client:
 
     def search_media(self, payload, kind='search', language='', allow_season_pack=False, limit=50,
                      progress=None, **filters):
-        title = title_from_payload(payload, language, kind)
-        if not title:
+        titles = search_titles(payload, language, kind)
+        if not titles:
             return []
         metadata = payload if isinstance(payload, dict) else {}
         season = integer(metadata.get('season'), None) if kind in ('season', 'episode') else None
         episode = integer(metadata.get('episode'), None) if kind == 'episode' else None
         year = integer(metadata.get('year')) if kind == 'movie' else 0
-        primary = [(title, year, season, episode)]
+        primary = [(title, year, season, episode) for title in titles]
         if season is not None and episode is not None and allow_season_pack:
-            primary.append((title, 0, season, None))
+            # Season packs are searched for the primary title only: the
+            # alternative names would multiply requests without new packs.
+            primary.append((titles[0], 0, season, None))
         fallback = []
         if season is not None:
             years = (integer(metadata.get(key)) for key in ('year', 'season_year', 'show_year'))
-            fallback = [(title, value, None, None) for value in dict.fromkeys(years) if value]
-            fallback.append((title, 0, None, None))
+            fallback = [(titles[0], value, None, None) for value in dict.fromkeys(years) if value]
+            fallback.append((titles[0], 0, None, None))
         indexers = self.indexers()
         if progress is None:
             def progress(*_args):

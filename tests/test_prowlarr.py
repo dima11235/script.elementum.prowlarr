@@ -236,8 +236,49 @@ class ProwlarrTests(unittest.TestCase):
 
     def test_localized_titles(self):
         payload = {'title': 'Movie', 'titles': {'RU': 'Фильм', 'en': 'Movie'}, 'year': 2001}
-        self.assertEqual(['Фильм 2001'], api.search_queries(payload, 'movie', 'ru'))
+        self.assertEqual(['Фильм 2001', 'Movie 2001'], api.search_queries(payload, 'movie', 'ru'))
         self.assertEqual(['Movie 2001'], api.search_queries(payload, 'movie'))
+
+    def test_search_covers_localized_and_english_titles(self):
+        payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар', 'en': 'Interstellar'},
+                   'query': 'Interstellar', 'year': 2014}
+        self.assertEqual(['Интерстеллар', 'Interstellar'], api.search_titles(payload, 'ru', 'movie'))
+        self.assertEqual(['Интерстеллар 2014', 'Interstellar 2014'],
+                         api.search_queries(payload, 'movie', 'ru'))
+        self.assertEqual(['Interstellar'], api.search_titles(payload, 'ru', 'search'))
+        russian = {'title': 'Движение вверх', 'titles': {'en': 'Upward Motion'}, 'query': 'Upward Motion'}
+        self.assertEqual(['Движение вверх', 'Upward Motion'], api.search_titles(russian, 'ru', 'movie'))
+        self.assertEqual(['Query'], api.search_titles('Query', 'ru', 'search'))
+        same = {'title': 'Movie', 'titles': {'ru': 'Movie'}}
+        self.assertEqual(['Movie'], api.search_titles(same, 'ru', 'movie'))
+
+    def test_media_searches_every_title_on_each_indexer(self):
+        indexers = [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'A'},
+                    {'id': 22, 'enable': True, 'protocol': 'torrent', 'name': 'B'}]
+        endpoints = []
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return indexers
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            endpoints.append((endpoint, params))
+            return ElementTree.fromstring(
+                '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>'
+                '<item><title>Movie 1080p WEB-DL</title>'
+                '<torznab:attr name="seeders" value="7"/></item>'
+                '</channel></rss>')
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар'}, 'query': 'Interstellar',
+                   'year': 2014}
+        client.search_media(payload, kind='movie', language='ru', limit=10)
+        searched = [params['q'] for endpoint, params in endpoints if endpoint.endswith('/newznab')]
+        self.assertEqual(sorted(searched),
+                         ['Interstellar 2014', 'Interstellar 2014',
+                          'Интерстеллар 2014', 'Интерстеллар 2014'])
+        self.assertEqual({'21', '22'},
+                         {endpoint.split('/')[3] for endpoint, _ in endpoints if '/newznab' in endpoint})
 
     def test_download_proxy_authorized_once_and_not_external(self):
         client, _ = self.client()
@@ -404,7 +445,8 @@ class ProwlarrTests(unittest.TestCase):
         payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар', 'en': 'Interstellar'},
                    'query': 'Interstellar', 'year': 2014}
         self.assertEqual('Интерстеллар', api.title_from_payload(payload, 'ru', 'movie'))
-        self.assertEqual(['Интерстеллар 2014'], api.search_queries(payload, 'movie', 'ru'))
+        self.assertEqual(['Интерстеллар 2014', 'Interstellar 2014'],
+                         api.search_queries(payload, 'movie', 'ru'))
         self.assertEqual('Interstellar', api.title_from_payload(payload, 'ru', 'search'))
         self.assertEqual('Interstellar', api.title_from_payload(payload, '', 'movie'))
         russian = {'title': 'Движение вверх', 'titles': {'en': 'Upward Motion'}, 'query': 'Upward Motion'}
