@@ -168,22 +168,20 @@ def filter_results(method, results):
     return results
 
 
-def episode_fallback(results, exact, titles):
-    # Ignore punctuation and separators when comparing names from indexers.
-    title_phrases = {
-        f" {' '.join(words)} " for title in titles
-        if (words := re.findall(r"[^\W_]+", title.casefold()))
-    }
-    exact_ids = {id(result) for result in exact}
-    fallback = []
+def title_phrase(title):
+    # Treat an ampersand and its written conjunction as equivalent separators.
+    words = re.findall(r"[^\W_]+", title.casefold().replace("ё", "е"))
+    return " ".join(word for word in words if word not in {"and", "и"}) or " ".join(words)
+
+
+def matching_titles(results, titles):
+    phrases = {f" {phrase} " for title in titles if (phrase := title_phrase(title))}
+    matched = []
     for result in results:
-        if id(result) in exact_ids:
-            continue
-        words = re.findall(r"[^\W_]+", result["name"].casefold())
-        name = f" {' '.join(words)} "
-        if any(phrase in name for phrase in title_phrases):
-            fallback.append(result)
-    return fallback
+        release = f" {title_phrase(result['name'])} "
+        if any(phrase in release for phrase in phrases):
+            matched.append(result)
+    return matched
 
 
 def sort_results(results):
@@ -236,6 +234,8 @@ async def search_prowlarr(p_dialog, payload, method):
     log.debug(f"Filtering {len(res)} torrents")
     p_dialog.update(heading=utils.translation(32602), message=utils.translation(32750))
     candidates = filter_results(method, res)
+    if method in ('movie', 'season', 'episode', 'anime'):
+        candidates = matching_titles(candidates, titles)
     exact = candidates
     smart_episode = method == 'episode' and get_setting('use_smart_show_filter', bool)
     if smart_episode:
@@ -253,7 +253,8 @@ async def search_prowlarr(p_dialog, payload, method):
     results = sort_results(results)
     missing = min(max_results, MIN_EPISODE_RESULTS) - len(results)
     if smart_episode and missing > 0:
-        fallback = episode_fallback(candidates, exact, titles)
+        exact_ids = {id(result) for result in exact}
+        fallback = [result for result in candidates if id(result) not in exact_ids]
         seen = {torrent.get_info_hash(result['uri']) for result in results}
         extras = await torrent.uri_to_magnets_uniq_torrents(fallback, progress, seen=seen)
         for extra in sort_results(extras)[:missing]:

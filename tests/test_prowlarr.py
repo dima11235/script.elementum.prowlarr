@@ -33,7 +33,7 @@ class _Addon:
     def getAddonInfo(self, key):
         return {'id': 'script.elementum.prowlarr', 'name': 'Elementum Prowlarr',
                 'path': str(ROOT), 'icon': '', 'profile': str(ROOT),
-                'version': '0.4.2'}[key]
+                'version': '0.4.3'}[key]
 
     def getSetting(self, key):
         return SETTINGS[key]
@@ -293,9 +293,10 @@ class ProviderTests(unittest.TestCase):
 
 
 class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def search(self, items, *, max_results=20):
+    async def search(self, items, *, max_results=20, method='episode'):
         cli = types.SimpleNamespace(
-            search_tv_smart=AsyncMock(return_value=items), close_session=AsyncMock(),
+            search_tv_smart=AsyncMock(return_value=items), search_movie=AsyncMock(return_value=items),
+            close_session=AsyncMock(),
         )
         payload = {
             'search_title': 'Death Comes to Pemberley',
@@ -306,7 +307,7 @@ class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
             'elementum.prowlarr.max_results': max_results,
             'elementum.prowlarr.filter_exclude_no_seed': True,
         }):
-            return await prowlarr.search_prowlarr(prowlarr.PDialog('Search'), payload, 'episode')
+            return await prowlarr.search_prowlarr(prowlarr.PDialog('Search'), payload, method)
 
     @staticmethod
     def item(title, key, seeds=5):
@@ -320,13 +321,26 @@ class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
             self.item('Death_Comes_To_Pemberley season pack', 'b', 20),
             self.item('Смерть приходит в Пемберли HDTV', 'c', 15),
             self.item('Death Comes to Pemberley another pack', 'd', 10),
-            self.item('Unrelated Show WEB-DL', 'e', 200),
+            self.item('Vikings.S01E01.1080p', 'e', 200),
             self.item('Death Comes to Pemberley with no seeds', 'f', 0),
         ]
         results = await self.search(items)
         self.assertEqual([items[i]['name'] for i in (0, 2, 3)], [r['name'] for r in results])
         self.assertEqual('Tracker', results[0]['provider'])
         self.assertTrue(all(r['provider'] == 'Tracker (string 32755)' for r in results[1:]))
+
+    async def test_unrelated_release_never_fills_an_empty_result(self):
+        for method in ('episode', 'season', 'movie'):
+            vikings = self.item('Vikings 2013 S01E01', 'f', 100)
+            self.assertEqual([], await self.search([vikings], method=method))
+
+    def test_title_gate_accepts_conjunction_variants_and_word_boundaries(self):
+        items = [
+            self.item('McDonald.and.Dodds.S01E01', 'a'),
+            self.item('Макдональд_и_Доддс.S01E01', 'b'),
+            self.item('McDonaldson and Dodds S01E01', 'c'),
+        ]
+        self.assertEqual(items[:2], prowlarr.matching_titles(items, ('McDonald & Dodds', 'Макдональд и Доддс')))
 
     async def test_fallback_after_exact_link_fails_respects_result_limit(self):
         broken = torrent('Death Comes to Pemberley S01E01', uri='magnet:?xt=invalid')
