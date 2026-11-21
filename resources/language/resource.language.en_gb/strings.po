@@ -35,10 +35,6 @@ msgctxt "#32012"
 msgid "Minimum seeders"
 msgstr "Minimum seeders"
 
-msgctxt "#32013"
-msgid "Maximum size, GiB (0 = unlimited)"
-msgstr "Maximum size, GiB (0 = unlimited)"
-
 msgctxt "#32014"
 msgid "Use titles in Kodi's language"
 msgstr "Use titles in Kodi's language"
@@ -54,6 +50,114 @@ msgstr "Require all words, comma separated"
 msgctxt "#32017"
 msgid "Exclude any words, comma separated"
 msgstr "Exclude any words, comma separated"
+
+msgctxt "#32030"
+msgid "Sort results by"
+msgstr "Sort results by"
+
+msgctxt "#32031"
+msgid "Resolution"
+msgstr "Resolution"
+
+msgctxt "#32032"
+msgid "Seeders"
+msgstr "Seeders"
+
+msgctxt "#32033"
+msgid "Size"
+msgstr "Size"
+
+msgctxt "#32034"
+msgid "Balanced"
+msgstr "Balanced"
+
+msgctxt "#32050"
+msgid "Size limits, GiB (0 = unlimited)"
+msgstr "Size limits, GiB (0 = unlimited)"
+
+msgctxt "#32040"
+msgid "Include releases with unknown size"
+msgstr "Include releases with unknown size"
+
+msgctxt "#32041"
+msgid "Movie minimum"
+msgstr "Movie minimum"
+
+msgctxt "#32042"
+msgid "Movie maximum"
+msgstr "Movie maximum"
+
+msgctxt "#32043"
+msgid "Season minimum"
+msgstr "Season minimum"
+
+msgctxt "#32044"
+msgid "Season maximum"
+msgstr "Season maximum"
+
+msgctxt "#32045"
+msgid "Episode minimum"
+msgstr "Episode minimum"
+
+msgctxt "#32046"
+msgid "Episode maximum"
+msgstr "Episode maximum"
+
+msgctxt "#32070"
+msgid "Result filters"
+msgstr "Result filters"
+
+msgctxt "#32051"
+msgid "2160p (4K)"
+msgstr "2160p (4K)"
+
+msgctxt "#32052"
+msgid "1440p"
+msgstr "1440p"
+
+msgctxt "#32053"
+msgid "1080p"
+msgstr "1080p"
+
+msgctxt "#32054"
+msgid "720p"
+msgstr "720p"
+
+msgctxt "#32055"
+msgid "480p"
+msgstr "480p"
+
+msgctxt "#32056"
+msgid "Unknown resolution"
+msgstr "Unknown resolution"
+
+msgctxt "#32057"
+msgid "Blu-ray / Remux"
+msgstr "Blu-ray / Remux"
+
+msgctxt "#32058"
+msgid "Web-DL / WebRip"
+msgstr "Web-DL / WebRip"
+
+msgctxt "#32059"
+msgid "HDTV"
+msgstr "HDTV"
+
+msgctxt "#32060"
+msgid "DVD"
+msgstr "DVD"
+
+msgctxt "#32061"
+msgid "TVRip / IPTV"
+msgstr "TVRip / IPTV"
+
+msgctxt "#32062"
+msgid "Unknown release type"
+msgstr "Unknown release type"
+
+msgctxt "#32063"
+msgid "Screener / CAM / TS"
+msgstr "Screener / CAM / TS"
 
 msgctxt "#32020"
 msgid "Connected. Enabled torrent indexers: {}"

@@ -116,10 +116,69 @@ class ProwlarrTests(unittest.TestCase):
                                 release(title='Movie CAM', infoHash='b' * 40),
                                 release(title='Movie 2160p', infoHash='c' * 40, size=10 * 1024 ** 3),
                                 release(title='Other', infoHash='d' * 40)])
-        results = client.search(['Movie', 'Movie'], min_seeders=2, max_size_gb=2,
+        results = client.search(['Movie', 'Movie'], min_seeders=2,
+                                size_ranges={'search': (0, 2)},
                                 require_keywords='movie,web', exclude_keywords='cam', limit=1)
         self.assertEqual(1, len(results))
         self.assertEqual(10, results[0]['seeds'])
+
+    def test_release_category_detection(self):
+        samples = {'Bluray REMUX 2160p': 'bluray', 'Movie WEB-DL 1080p': 'web',
+                   'Show HDTV x264': 'hdtv', 'Film DVDRip': 'dvd', 'Series TVRip': 'tvrip',
+                   'Movie CAM': 'screener', 'Telesync release': 'screener', 'Mystery release': 'unknown'}
+        for title, expected in samples.items():
+            self.assertEqual(expected, api.release_category(title), title)
+
+    def test_resolution_filter_excludes_unchecked_tiers(self):
+        client, _ = self.client([release(title='Movie 2160p', infoHash='a' * 40),
+                                 release(infoHash='b' * 40), release(title='Movie 480p', infoHash='c' * 40)])
+        results = client.search(['Movie'], include_resolutions={3})
+        self.assertEqual(1, len(results))
+        self.assertEqual(3, results[0]['resolution'])
+
+    def test_release_type_filter_hides_screener_by_default(self):
+        client, _ = self.client([release(), release(title='Movie CAM', infoHash='b' * 40),
+                                 release(title='Movie Trailer', infoHash='c' * 40)])
+        results = client.search(['Movie'], include_release_types={'bluray', 'web', 'hdtv',
+                                                                  'dvd', 'tvrip', 'unknown'})
+        self.assertEqual(1, len(results))
+        self.assertEqual('web', results[0]['category'])
+
+    def test_size_limits_per_kind_and_unknown_size(self):
+        resources = [release(size=1024 ** 3), release(size=100 * 1024 ** 3, infoHash='b' * 40),
+                     release(size=None, infoHash='c' * 40)]
+        client, _ = self.client(resources)
+        results = client.search(['Movie'], kind='movie', size_ranges={'movie': (0.5, 30)},
+                                include_unknown_size=False)
+        self.assertEqual(1, len(results))
+        client, _ = self.client(resources)
+        results = client.search(['Movie'], kind='movie', size_ranges={'movie': (0.5, 30)})
+        self.assertEqual(2, len(results))
+
+    def test_sort_modes(self):
+        low = release(title='Movie 480p', infoHash='a' * 40, size=1024 ** 3, seeders=1)
+        high = release(title='Movie 2160p', infoHash='b' * 40, size=50 * 1024 ** 3, seeders=3)
+        tiny = release(infoHash='c' * 40, seeders=10)
+        for mode, expected_name in (('resolution', 'Movie 2160p'), ('seeds', 'Movie 1080p WEB-DL'),
+                                    ('size', 'Movie 2160p'), ('balanced', 'Movie 1080p WEB-DL')):
+            client, _ = self.client([low, high, tiny])
+            results = client.search(['Movie'], sort_by=mode, limit=1)
+            self.assertEqual(expected_name, results[0]['name'], mode)
+
+    def test_season_episode_params_only_for_capable_indexers(self):
+        capable = {'id': 21, 'enable': True, 'protocol': 'torrent', 'supportsSearch': True,
+                   'capabilities': {'tvSearchParams': ['q', 'season', 'ep']}}
+        client, transport = self.client([release()])
+        client.search(['Show S01E02'], kind='episode', season=1, episode=2)
+        self.assertNotIn('season', transport.call_args.args[1])
+        resources = [capable]
+        transport = Mock(side_effect=lambda endpoint, params=None:
+                         resources if endpoint.endswith('indexer') else
+                         [] if endpoint.endswith('indexerstatus') else [release()])
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        client.search(['Show S01E02'], kind='episode', season=1, episode=2)
+        self.assertEqual(1, transport.call_args.args[1].get('season'))
+        self.assertEqual(2, transport.call_args.args[1].get('episode'))
 
     def test_null_numeric_fields(self):
         client, _ = self.client()

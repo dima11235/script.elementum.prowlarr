@@ -32,6 +32,24 @@ def resolution(title):
     return 0
 
 
+RELEASE_CATEGORIES = (
+    ('screener', r'\b(cam|hdcam|telesync|\bts\b|\btc\b|dvdscr|screener|trailer|workprint|vhs)\b'),
+    ('bluray', r'blu.?ray|bd(remux|rip)|remux'),
+    ('web', r'web[ ._-]?(dl|rip)'),
+    ('hdtv', r'\b(hdtv|hdtc|pdtv|dsr(ip)?)\b'),
+    ('dvd', r'\bdvd(rip|r|5|9)?\b'),
+    ('tvrip', r'\b(hdtvrip|tvrip|iptv|satrip)\b'),
+)
+
+
+def release_category(title):
+    """Shortened Jackett-style release type detection for result filtering."""
+    for name, pattern in RELEASE_CATEGORIES:
+        if re.search(pattern, title, re.IGNORECASE):
+            return name
+    return 'unknown'
+
+
 def human_size(size):
     value = float(size)
     for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
@@ -81,6 +99,7 @@ class Client:
         self.timeout = max(5, min(180, integer(timeout, 60)))
         self.transport = transport or self._request
         self._indexers = None
+        self._caps = {}
 
     def _request(self, endpoint, params=None):
         url = urljoin(self.base, endpoint)
@@ -127,15 +146,37 @@ class Client:
                         blocked.add(integer(status.get('indexerId')))
                 except (ValueError, TypeError):
                     continue
-            self._indexers = [resource for resource in resources if isinstance(resource, dict)
-                              and resource.get('enable')
-                              and resource.get('protocol') == 'torrent'
-                              and resource.get('supportsSearch') is not False
-                              and integer(resource.get('id')) > 0
-                              and integer(resource.get('id')) not in blocked]
+            self._caps = {}
+            self._indexers = []
+            for resource in resources:
+                if not isinstance(resource, dict) or not resource.get('enable') \
+                        or resource.get('protocol') != 'torrent' \
+                        or resource.get('supportsSearch') is False \
+                        or integer(resource.get('id')) <= 0 \
+                        or integer(resource.get('id')) in blocked:
+                    continue
+                caps = resource.get('capabilities')
+                self._caps[integer(resource.get('id'))] = caps if isinstance(caps, dict) else {}
+                self._indexers.append(resource)
         if not self._indexers:
             raise ProwlarrError('No enabled torrent indexers available; check Prowlarr and indexer cooldowns')
         return self._indexers
+
+    def supported_params(self, ids, kind):
+        """Search parameters every selected indexer declares support for."""
+        key = ('movieSearchParams' if kind == 'movie'
+               else 'tvSearchParams' if kind in ('episode', 'season')
+               else 'searchParams')
+        aliases = {'ep': 'episode'}
+        supported = None
+        for indexer_id in ids:
+            caps = self._caps.get(indexer_id, {})
+            values = caps.get(key) if isinstance(caps, dict) else None
+            if not isinstance(values, list):
+                return set()
+            declared = {aliases.get(str(value).lower(), str(value).lower()) for value in values}
+            supported = declared if supported is None else supported & declared
+        return supported or set()
 
     def download_uri(self, uri):
         if not isinstance(uri, str) or not uri:
@@ -182,19 +223,38 @@ class Client:
         return {'name': title.strip(), 'uri': uri, 'provider': str(resource.get('indexer') or 'Prowlarr'),
                 'seeds': seeds, 'peers': seeds + integer(resource.get('leechers')),
                 'size': human_size(size) if size else 'Unknown', '_size_bytes': size,
-                'info_hash': info_hash, 'resolution': resolution(title), 'release_type': release_type}
+                'info_hash': info_hash, 'resolution': resolution(title), 'release_type': release_type,
+                'category': release_category(title)}
 
-    def search(self, queries, kind='search', limit=50, min_seeders=1, max_size_gb=0,
-               require_keywords='', exclude_keywords=''):
+    SORT_KEYS = {
+        'resolution': lambda item: (item['resolution'], item['seeds']),
+        'seeds': lambda item: (item['seeds'], item['resolution']),
+        'size': lambda item: item['_size_bytes'],
+        'balanced': lambda item: item['seeds'] * 3 * (item['resolution'] or 1),
+    }
+
+    def search(self, queries, kind='search', limit=50, min_seeders=1, season=None, episode=None,
+               size_ranges=None, include_unknown_size=True, include_resolutions=None,
+               include_release_types=None, require_keywords='', exclude_keywords='',
+               sort_by='seeds'):
         ids = [integer(item['id']) for item in self.indexers()]
         categories = [2000] if kind == 'movie' else [5000] if kind in ('episode', 'season') else []
-        unique = {}
+        supported = self.supported_params(ids, kind)
+        size = (size_ranges or {}).get(kind) or (size_ranges or {}).get('search') or (0, 0)
+        size_min, size_max = max(0.0, size[0]), max(0.0, size[1])
         required = [word.strip().casefold() for word in require_keywords.split(',') if word.strip()]
         excluded = [word.strip().casefold() for word in exclude_keywords.split(',') if word.strip()]
+        unique = {}
         for query in dict.fromkeys(queries):
             params = {'query': query, 'type': 'search', 'indexerIds': ids}
             if categories:
                 params['categories'] = categories
+            # Parameters go only to indexers that declare them; the title query
+            # already contains SxxEyy, so unsupported indexers stay covered.
+            if season is not None and integer(season) and 'season' in supported:
+                params['season'] = integer(season)
+            if episode is not None and integer(episode) and kind == 'episode' and 'episode' in supported:
+                params['episode'] = integer(episode)
             resources = self.transport('api/v1/search', params)
             if not isinstance(resources, list):
                 raise ProwlarrError('Prowlarr returned an invalid search result')
@@ -202,8 +262,17 @@ class Client:
                 result = self.parse_release(resource)
                 if result is None or result['seeds'] < integer(min_seeders):
                     continue
-                if max_size_gb > 0 and result['_size_bytes'] > max_size_gb * 1024 ** 3:
+                if include_resolutions is not None and result['resolution'] not in include_resolutions:
                     continue
+                if include_release_types is not None and result['category'] not in include_release_types:
+                    continue
+                if size_min > 0 or size_max > 0:
+                    if not result['_size_bytes']:
+                        if not include_unknown_size:
+                            continue
+                    elif result['_size_bytes'] < size_min * 1024 ** 3 \
+                            or (size_max > 0 and result['_size_bytes'] > size_max * 1024 ** 3):
+                        continue
                 name = result['name'].casefold()
                 if any(word not in name for word in required) or any(word in name for word in excluded):
                     continue
@@ -211,5 +280,6 @@ class Client:
                 previous = unique.get(identity)
                 if previous is None or previous['seeds'] < result['seeds']:
                     unique[identity] = result
-        return sorted(unique.values(), key=lambda item: (item['seeds'], item['resolution']),
-                      reverse=True)[:max(1, min(500, integer(limit, 50)))]
+        results = sorted(unique.values(), key=self.SORT_KEYS.get(sort_by, self.SORT_KEYS['seeds']),
+                         reverse=True)
+        return results[:max(1, min(500, integer(limit, 50)))]

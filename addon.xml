@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<addon id="script.elementum.prowlarr" name="Elementum Prowlarr" version="0.1.0" provider-name="Elementum Prowlarr contributors">
+<addon id="script.elementum.prowlarr" name="Elementum Prowlarr" version="0.2.0" provider-name="Elementum Prowlarr contributors">
   <requires>
     <import addon="xbmc.python" version="3.0.0"/>
     <import addon="plugin.video.elementum" version="0.1.119"/>
@@ -14,6 +14,6 @@
     <description lang="ru_RU">Отдельный провайдер Elementum для Prowlarr. Поиск фильмов, сезонов и серий через включённые torrent-индексаторы. Укажите адрес своего Prowlarr и API-ключ в настройках.</description>
     <license>MIT</license>
     <platform>all</platform>
-    <news>0.1.0: independent Prowlarr provider; Python standard library; reproducible ZIP releases.</news>
+    <news>0.2.0: result filters (resolution, release type, per-kind size limits), four sort modes, indexer capability gate; 0.1.0: independent Prowlarr provider; Python standard library; reproducible ZIP releases.</news>
   </extension>
 </addon>

@@ -11,6 +11,15 @@ from prowlarr import Client, ProwlarrError, search_queries  # noqa: E402
 
 ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
 
+SORT_MODES = ('resolution', 'seeds', 'size', 'balanced')
+RESOLUTION_SETTINGS = ((5, 'include_resolution_2160'), (4, 'include_resolution_1440'),
+                       (3, 'include_resolution_1080p'), (2, 'include_resolution_720p'),
+                       (1, 'include_resolution_480p'), (0, 'include_resolution_unknown'))
+RELEASE_SETTINGS = (('bluray', 'include_release_bluray'), ('web', 'include_release_web'),
+                    ('hdtv', 'include_release_hdtv'), ('dvd', 'include_release_dvd'),
+                    ('tvrip', 'include_release_tvrip'), ('unknown', 'include_release_unknown'),
+                    ('screener', 'include_release_screener'))
+
 
 def localize(identifier):
     return ADDON.getLocalizedString(identifier)
@@ -19,6 +28,20 @@ def localize(identifier):
 def client():
     return Client(ADDON.getSetting('host'), ADDON.getSetting('api_key'),
                   timeout=ADDON.getSettingInt('timeout'))
+
+
+def size_range(kind):
+    def value(setting):
+        try:
+            return max(0.0, float(ADDON.getSetting(setting) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    return (value(f'{kind}_size_min'), value(f'{kind}_size_max'))
+
+
+def included(mapping):
+    included_items = {value for value, setting in mapping if ADDON.getSettingBool(setting)}
+    return included_items or None
 
 
 def search(payload, kind='search'):
@@ -31,9 +54,15 @@ def search(payload, kind='search'):
         results = client().search(
             queries, kind=kind, limit=ADDON.getSettingInt('max_results'),
             min_seeders=ADDON.getSettingInt('min_seeders'),
-            max_size_gb=float(ADDON.getSetting('max_size_gb') or 0),
+            season=payload.get('season') if isinstance(payload, dict) else None,
+            episode=payload.get('episode') if isinstance(payload, dict) else None,
+            size_ranges={kind: size_range(kind)} if kind in ('movie', 'season', 'episode') else None,
+            include_unknown_size=ADDON.getSettingBool('include_unknown_size'),
+            include_resolutions=included(RESOLUTION_SETTINGS),
+            include_release_types=included(RELEASE_SETTINGS),
             require_keywords=ADDON.getSetting('require_keywords'),
-            exclude_keywords=ADDON.getSetting('exclude_keywords'))
+            exclude_keywords=ADDON.getSetting('exclude_keywords'),
+            sort_by=SORT_MODES[max(0, min(3, ADDON.getSettingInt('sort_by')))])
         xbmc.log(f'Elementum Prowlarr: returned {len(results)} results', xbmc.LOGINFO)
         return results
     except ProwlarrError as error:
