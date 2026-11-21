@@ -45,6 +45,11 @@ RELEASE_CATEGORIES = (
     ('tvrip', r'\b(hdtvrip|tvrip|iptv|satrip)\b'),
 )
 
+# The alternative title is skipped on indexers whose localized-title search
+# already returned at least this many releases: those indexers clearly index
+# the localized name and the second request would only duplicate the load.
+ADAPTIVE_TITLE_THRESHOLD = 5
+
 
 def release_category(title):
     """Shortened Jackett-style release type detection for result filtering."""
@@ -428,7 +433,7 @@ class Client:
         root = self.transport(endpoint, torznab_params(indexer, kind, query))
         return list(torznab_releases(root, indexer))
 
-    def _torznab_search(self, pool, indexers, kind, query, progress):
+    def _torznab_search(self, pool, indexers, kind, query, progress, counts=None):
         names = [str(indexer.get('name') or indexer['id']) for indexer in indexers]
         progress(0, 'indexers', ', '.join(names))
         pending = {pool.submit(self._search_indexer, indexer, kind, query): name
@@ -444,6 +449,8 @@ class Client:
                 progress(completed, 'indexer_error', name)
             else:
                 progress(completed, 'indexer_results', name, len(releases[result]))
+                if counts is not None:
+                    counts[name] = len(releases[result])
         if len(errors) == len(pending):
             raise errors[next(iter(pending))]
         # Preserve indexer order for releases with identical sort keys.
@@ -477,6 +484,8 @@ class Client:
         per_query = len(indexers)
         total = per_query * len(dict.fromkeys((*primary, *fallback)))
         requested = 0
+        first_query = primary[0]
+        first_counts = {}
         with ThreadPoolExecutor(max_workers=6) as pool:
             def fetch(query):
                 nonlocal requested
@@ -484,8 +493,22 @@ class Client:
                 def report(completed, event, *args):
                     progress(5 + 75 * (requested + completed) // total, event, *args)
 
-                resources = self._torznab_search(pool, indexers, kind, query, report)
-                requested += per_query
+                # The alternative title only runs on indexers whose localized
+                # search returned too few releases; where the localized name
+                # already works the second request is redundant load.
+                skip = set()
+                if query is not first_query and first_counts:
+                    skip = {name for name, count in first_counts.items()
+                            if count >= ADAPTIVE_TITLE_THRESHOLD}
+                remaining = [indexer for indexer in indexers
+                             if (indexer.get('name') or str(indexer.get('id'))) not in skip]
+                if not remaining:
+                    requested += per_query
+                    return []
+                resources = self._torznab_search(
+                    pool, remaining, kind, query, report,
+                    counts=first_counts if query is first_query else None)
+                requested += len(remaining)
                 return resources
 
             candidates = self._search(

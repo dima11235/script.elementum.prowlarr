@@ -1,18 +1,31 @@
 """Kodi entry point and Elementum provider callbacks."""
 import os
 import sys
+import time
 
 import xbmc
 import xbmcaddon
 import xbmcgui
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'resources', 'lib'))
-from prowlarr import Client, ProwlarrError  # noqa: E402
+from prowlarr import Client, ProwlarrError, search_titles  # noqa: E402
 
 ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
 ADDON_NAME = 'Elementum Prowlarr'
 PROGRESS_MESSAGES = {'indexers': 32065, 'cooldown': 32072, 'indexer_results': 32066,
                      'indexer_error': 32067, 'links': 32068}
+# Elementum re-invokes the provider several times for one item; a short-lived
+# cache keeps those repeats from hammering trackers that rate-limit requests.
+CACHE_TTL_SECONDS = 150
+CACHE_SETTINGS = ('max_results', 'min_seeders', 'season_fallback', 'include_unknown_size',
+                  'movie_size_min', 'movie_size_max', 'season_size_min', 'season_size_max',
+                  'episode_size_min', 'episode_size_max', 'require_keywords', 'exclude_keywords',
+                  'include_resolution_2160', 'include_resolution_1440', 'include_resolution_1080p',
+                  'include_resolution_720p', 'include_resolution_480p', 'include_resolution_unknown',
+                  'include_release_bluray', 'include_release_web', 'include_release_hdtv',
+                  'include_release_dvd', 'include_release_tvrip', 'include_release_unknown',
+                  'include_release_screener', 'sort_by')
+_cache = {}
 
 SORT_MODES = ('resolution', 'seeds', 'size', 'balanced')
 RESOLUTION_SETTINGS = ((5, 'include_resolution_2160'), (4, 'include_resolution_1440'),
@@ -55,6 +68,15 @@ def search(payload, kind='search'):
     try:
         progress.create(ADDON_NAME, localize(32064))
         language = xbmc.getLanguage(xbmc.ISO_639_1) if ADDON.getSettingBool('localized_titles') else ''
+        key = repr((kind, language, tuple(search_titles(payload, language, kind)),
+                    tuple(ADDON.getSetting(name) for name in CACHE_SETTINGS),
+                    ADDON.getSettingInt('timeout')))
+        stamp = time.monotonic()
+        cached = _cache.get(key)
+        if cached and stamp - cached[0] < CACHE_TTL_SECONDS:
+            progress.update(100, message=localize(32073).format(len(cached[1])))
+            xbmc.log(f'Elementum Prowlarr: served {len(cached[1])} cached results', xbmc.LOGINFO)
+            return list(cached[1])
         allow_season_pack = ADDON.getSettingBool('season_fallback')
         results = client().search_media(
             payload, kind=kind, language=language, limit=ADDON.getSettingInt('max_results'),
@@ -68,6 +90,10 @@ def search(payload, kind='search'):
             require_keywords=ADDON.getSetting('require_keywords'),
             exclude_keywords=ADDON.getSetting('exclude_keywords'),
             sort_by=SORT_MODES[max(0, min(3, ADDON.getSettingInt('sort_by')))])
+        _cache[key] = (time.monotonic(), tuple(results))
+        for stale in [item for item, (saved, _) in _cache.items()
+                      if time.monotonic() - saved >= CACHE_TTL_SECONDS]:
+            _cache.pop(stale, None)
     except ProwlarrError as error:
         xbmc.log(f'Elementum Prowlarr: {error}', xbmc.LOGWARNING)
         progress.update(100, message=str(error))

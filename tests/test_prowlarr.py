@@ -122,6 +122,36 @@ class ProwlarrTests(unittest.TestCase):
             (80, 'indexer_error', 'Slow'),
         ], events)
 
+    def test_repeated_search_is_served_from_cache(self):
+        gui = Mock()
+        settings = Mock()
+        settings.getSettingInt.return_value = 0
+        settings.getSetting.return_value = ''
+        settings.getSettingBool.return_value = False
+        settings.getLocalizedString.side_effect = {32064: 'Starting', 32073: 'Cached: {}'}.get
+        addon_api = Mock()
+        addon_api.Addon.return_value = settings
+        with patch.dict(sys.modules, {'xbmc': Mock(), 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}):
+            with patch.object(sys, 'path', sys.path[:]):
+                addon = load('addon_tested_cache', ROOT / 'addon.py')
+        client = Mock()
+        client.search_media.return_value = [{'name': 'Movie'}]
+        clock = Mock(return_value=100.0)
+        with patch.object(addon, 'client', return_value=client), \
+                patch.object(addon.time, 'monotonic', clock):
+            first = addon.search('Movie')
+            self.assertEqual(1, client.search_media.call_count)
+            second = addon.search('Movie')
+            self.assertEqual(1, client.search_media.call_count)
+            self.assertEqual('Cached: 1', gui.DialogProgressBG.return_value.update.call_args_list[-1].kwargs['message'])
+            clock.return_value = 400.0
+            third = addon.search('Movie')
+            self.assertEqual(2, client.search_media.call_count)
+        self.assertEqual([{'name': 'Movie'}], first)
+        self.assertEqual([{'name': 'Movie'}], second)
+        self.assertEqual([{'name': 'Movie'}], third)
+        self.assertIsNot(second, third)
+
     def test_progress_window_is_the_only_dialog(self):
         gui = Mock()
         settings = Mock()
@@ -142,14 +172,14 @@ class ProwlarrTests(unittest.TestCase):
         client = Mock()
         with patch.object(addon, 'client', return_value=client):
             client.search_media.side_effect = search_media
-            self.assertEqual([{'name': 'Movie'}], addon.search('Movie'))
+            self.assertEqual([{'name': 'Movie'}], addon.search('Movie A'))
             gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
             gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = api.ProwlarrError('Unavailable')
-            self.assertEqual([], addon.search('Movie'))
+            self.assertEqual([], addon.search('Movie B'))
             gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Unavailable')
             client.search_media.side_effect = RuntimeError
-            self.assertEqual([], addon.search('Movie'))
+            self.assertEqual([], addon.search('Movie C'))
             gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Failed')
         self.assertEqual(3, gui.DialogProgressBG.return_value.close.call_count)
         gui.Dialog.return_value.notification.assert_not_called()
@@ -202,6 +232,30 @@ class ProwlarrTests(unittest.TestCase):
         with patch.object(api, 'build_opener', return_value=opener):
             result = client.search_media('Movie', limit=1)
         self.assertEqual([magnet], [item['uri'] for item in result])
+
+    def test_second_title_runs_only_where_localized_title_failed(self):
+        item = ('<item><title>Movie 1080p WEB-DL</title>'
+                '<torznab:attr name="seeders" value="7"/></item>')
+        requested = []
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'Local'},
+                        {'id': 22, 'enable': True, 'protocol': 'torrent', 'name': 'Intl'}]
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            identifier = endpoint.split('/')[3]
+            localized = 'Фильм' in params['q']
+            body = item * ((6 if identifier == '21' else 0) if localized else 3)
+            requested.append((identifier, params['q']))
+            return ElementTree.fromstring(
+                f'<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>{body}</channel></rss>')
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        payload = {'title': 'Movie', 'titles': {'ru': 'Фильм', 'en': 'Movie'}, 'year': 2001}
+        client.search_media(payload, kind='movie', language='ru', limit=20)
+        self.assertEqual(sorted(requested),
+                         [('21', 'Фильм 2001'), ('22', 'Movie 2001'), ('22', 'Фильм 2001')])
 
     def test_same_torrent_from_two_title_queries_is_reported_once(self):
         client, _ = self.client()
