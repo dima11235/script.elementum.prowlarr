@@ -1,0 +1,64 @@
+msgid ""
+msgstr ""
+"Language: en_GB\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgctxt "#32000"
+msgid "Connection"
+msgstr "Connection"
+
+msgctxt "#32001"
+msgid "Prowlarr URL"
+msgstr "Prowlarr URL"
+
+msgctxt "#32002"
+msgid "Prowlarr API key"
+msgstr "Prowlarr API key"
+
+msgctxt "#32003"
+msgid "Test connection"
+msgstr "Test connection"
+
+msgctxt "#32004"
+msgid "Request timeout, seconds"
+msgstr "Request timeout, seconds"
+
+msgctxt "#32010"
+msgid "Search"
+msgstr "Search"
+
+msgctxt "#32011"
+msgid "Maximum results"
+msgstr "Maximum results"
+
+msgctxt "#32012"
+msgid "Minimum seeders"
+msgstr "Minimum seeders"
+
+msgctxt "#32013"
+msgid "Maximum size, GiB (0 = unlimited)"
+msgstr "Maximum size, GiB (0 = unlimited)"
+
+msgctxt "#32014"
+msgid "Use titles in Kodi's language"
+msgstr "Use titles in Kodi's language"
+
+msgctxt "#32015"
+msgid "Also search season packs for episodes"
+msgstr "Also search season packs for episodes"
+
+msgctxt "#32016"
+msgid "Require all words, comma separated"
+msgstr "Require all words, comma separated"
+
+msgctxt "#32017"
+msgid "Exclude any words, comma separated"
+msgstr "Exclude any words, comma separated"
+
+msgctxt "#32020"
+msgid "Connected. Enabled torrent indexers: {}"
+msgstr "Connected. Enabled torrent indexers: {}"
+
+msgctxt "#32021"
+msgid "Search failed. Check the connection and settings."
+msgstr "Search failed. Check the connection and settings."

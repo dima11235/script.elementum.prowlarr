@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+  <category label="32000">
+    <setting id="host" type="text" label="32001" default="http://localhost:9696"/>
+    <setting id="api_key" type="text" label="32002" option="hidden" default=""/>
+    <setting type="action" label="32003" action="RunScript(script.elementum.prowlarr,test)" option="close"/>
+    <setting id="timeout" type="slider" label="32004" default="60" range="5,5,180" option="int"/>
+  </category>
+  <category label="32010">
+    <setting id="max_results" type="slider" label="32011" default="50" range="5,5,200" option="int"/>
+    <setting id="min_seeders" type="number" label="32012" default="1"/>
+    <setting id="max_size_gb" type="number" label="32013" default="0"/>
+    <setting id="localized_titles" type="bool" label="32014" default="true"/>
+    <setting id="season_fallback" type="bool" label="32015" default="false"/>
+    <setting id="require_keywords" type="text" label="32016" default=""/>
+    <setting id="exclude_keywords" type="text" label="32017" default=""/>
+  </category>
+</settings>

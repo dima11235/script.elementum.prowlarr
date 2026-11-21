@@ -1,0 +1,64 @@
+msgid ""
+msgstr ""
+"Language: ru_RU\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgctxt "#32000"
+msgid "Connection"
+msgstr "Подключение"
+
+msgctxt "#32001"
+msgid "Prowlarr URL"
+msgstr "Адрес Prowlarr"
+
+msgctxt "#32002"
+msgid "Prowlarr API key"
+msgstr "API-ключ Prowlarr"
+
+msgctxt "#32003"
+msgid "Test connection"
+msgstr "Проверить подключение"
+
+msgctxt "#32004"
+msgid "Request timeout, seconds"
+msgstr "Время ожидания запроса, секунд"
+
+msgctxt "#32010"
+msgid "Search"
+msgstr "Поиск"
+
+msgctxt "#32011"
+msgid "Maximum results"
+msgstr "Максимум результатов"
+
+msgctxt "#32012"
+msgid "Minimum seeders"
+msgstr "Минимум раздающих"
+
+msgctxt "#32013"
+msgid "Maximum size, GiB (0 = unlimited)"
+msgstr "Максимальный размер, ГиБ (0 = без ограничения)"
+
+msgctxt "#32014"
+msgid "Use titles in Kodi's language"
+msgstr "Использовать названия на языке Kodi"
+
+msgctxt "#32015"
+msgid "Also search season packs for episodes"
+msgstr "При поиске серии искать также весь сезон"
+
+msgctxt "#32016"
+msgid "Require all words, comma separated"
+msgstr "Обязательные слова через запятую"
+
+msgctxt "#32017"
+msgid "Exclude any words, comma separated"
+msgstr "Исключаемые слова через запятую"
+
+msgctxt "#32020"
+msgid "Connected. Enabled torrent indexers: {}"
+msgstr "Подключение работает. Включённых torrent-индексаторов: {}"
+
+msgctxt "#32021"
+msgid "Search failed. Check the connection and settings."
+msgstr "Ошибка поиска. Проверьте подключение и настройки."
