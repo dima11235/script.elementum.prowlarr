@@ -373,3 +373,7 @@ msgstr ""
 msgctxt "#32010"
 msgid "Prefer titles in Kodi language"
 msgstr ""
+
+msgctxt "#32755"
+msgid "Possible match"
+msgstr ""

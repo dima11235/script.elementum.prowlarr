@@ -20,6 +20,8 @@ from logger import log
 from utils import get_setting
 from pdialoghelper import PDialog
 
+MIN_EPISODE_RESULTS = 3
+
 available_providers = 0
 special_chars = "()\"':.[]<>/\\?"
 
@@ -142,8 +144,7 @@ def parse_payload(method, payload):
     return payload
 
 
-def filter_results(method, results, season, season_name, episode, global_ep, ep_year, season_year=0, start_year=0):
-
+def filter_results(method, results):
     if get_setting('filter_keywords_enabled', bool):
         log.info(f"{len(results)} ... filtering keywords ")
         results = filter.keywords(results)
@@ -164,15 +165,25 @@ def filter_results(method, results, season, season_name, episode, global_ep, ep_
         log.info(f"{len(results)} ... filtering no seeds")
         results = filter.seed(results)
 
-    if method == "episode" and get_setting("use_smart_show_filter", bool):
-        log.info(f"{len(results)} ... smart-filtering show torrents")
-        results = filter.tv_season_episode(results, season, season_name, episode, global_ep, ep_year, season_year,
-                                           start_year)
-
-    # todo maybe rating and codec
-
-
     return results
+
+
+def episode_fallback(results, exact, titles):
+    # Ignore punctuation and separators when comparing names from indexers.
+    title_phrases = {
+        f" {' '.join(words)} " for title in titles
+        if (words := re.findall(r"[^\W_]+", title.casefold()))
+    }
+    exact_ids = {id(result) for result in exact}
+    fallback = []
+    for result in results:
+        if id(result) in exact_ids:
+            continue
+        words = re.findall(r"[^\W_]+", result["name"].casefold())
+        name = f" {' '.join(words)} "
+        if any(phrase in name for phrase in title_phrases):
+            fallback.append(result)
+    return fallback
 
 
 def sort_results(results):
@@ -224,15 +235,30 @@ async def search_prowlarr(p_dialog, payload, method):
 
     log.debug(f"Filtering {len(res)} torrents")
     p_dialog.update(heading=utils.translation(32602), message=utils.translation(32750))
-    res = filter_results(method, res, payload.get('season', None), payload.get('season_name', ""),
-                         payload.get('episode', None), payload.get('absolute_number', None), payload.get('year', None),
-                         payload.get('season_year', None), payload.get('show_year', None))
+    candidates = filter_results(method, res)
+    exact = candidates
+    smart_episode = method == 'episode' and get_setting('use_smart_show_filter', bool)
+    if smart_episode:
+        exact = filter.tv_season_episode(
+            candidates, payload.get('season'), payload.get('season_name', ''),
+            payload.get('episode'), payload.get('absolute_number'), payload.get('year'),
+            payload.get('season_year') or 0, payload.get('show_year') or 0,
+        )
 
-    log.info(f"{len(res)} ... resolving unique magnets ")
-    res = await torrent.uri_to_magnets_uniq_torrents(res, p_dialog.callback(100))
-
+    log.info(f"{len(exact)} ... resolving unique magnets")
+    progress = p_dialog.callback(100)
+    max_results = get_setting('max_results', int)
+    results = await torrent.uri_to_magnets_uniq_torrents(exact, progress)
     p_dialog.update(message=utils.translation(32753))
-    res = sort_results(res)
+    results = sort_results(results)
+    missing = min(max_results, MIN_EPISODE_RESULTS) - len(results)
+    if smart_episode and missing > 0:
+        fallback = episode_fallback(candidates, exact, titles)
+        seen = {torrent.get_info_hash(result['uri']) for result in results}
+        extras = await torrent.uri_to_magnets_uniq_torrents(fallback, progress, seen=seen)
+        for extra in sort_results(extras)[:missing]:
+            extra['provider'] += f" ({utils.translation(32755)})"
+            results.append(extra)
 
     p_dialog.update(message=utils.translation(32754))
-    return res[:get_setting('max_results', int)]
+    return results[:max_results]

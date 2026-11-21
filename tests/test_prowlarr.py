@@ -4,7 +4,7 @@ import sys
 import types
 import runpy
 import io
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import unittest
 from pathlib import Path
 from xml.etree import ElementTree
@@ -33,7 +33,7 @@ class _Addon:
     def getAddonInfo(self, key):
         return {'id': 'script.elementum.prowlarr', 'name': 'Elementum Prowlarr',
                 'path': str(ROOT), 'icon': '', 'profile': str(ROOT),
-                'version': '0.4.1'}[key]
+                'version': '0.4.2'}[key]
 
     def getSetting(self, key):
         return SETTINGS[key]
@@ -290,6 +290,55 @@ class ProviderTests(unittest.TestCase):
         with patch.dict(SETTINGS, api_key=''):
             self.assertEqual([], prowlarr.search('Show'))
             asyncio.run(prowlarr.validate_client())
+
+
+class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def search(self, items, *, max_results=20):
+        cli = types.SimpleNamespace(
+            search_tv_smart=AsyncMock(return_value=items), close_session=AsyncMock(),
+        )
+        payload = {
+            'search_title': 'Death Comes to Pemberley',
+            'search_titles': ('Death Comes to Pemberley', 'Смерть приходит в Пемберли'),
+            'season': 1, 'episode': 1, 'year': 2013, 'season_year': 2013, 'show_year': 2013,
+        }
+        with patch.object(prowlarr, 'get_client', return_value=cli), patch.dict(SETTINGS, {
+            'elementum.prowlarr.max_results': max_results,
+            'elementum.prowlarr.filter_exclude_no_seed': True,
+        }):
+            return await prowlarr.search_prowlarr(prowlarr.PDialog('Search'), payload, 'episode')
+
+    @staticmethod
+    def item(title, key, seeds=5):
+        return torrent(title, seeds=seeds, uri='magnet:?xt=urn:btih:' + key * 40)
+
+    async def test_keeps_exact_first_then_fills_from_same_show(self):
+        exact = self.item('Death Comes to Pemberley S01E01', 'a')
+        items = [
+            exact,
+            self.item('Death Comes to Pemberley duplicate', 'a', 100),
+            self.item('Death_Comes_To_Pemberley season pack', 'b', 20),
+            self.item('Смерть приходит в Пемберли HDTV', 'c', 15),
+            self.item('Death Comes to Pemberley another pack', 'd', 10),
+            self.item('Unrelated Show WEB-DL', 'e', 200),
+            self.item('Death Comes to Pemberley with no seeds', 'f', 0),
+        ]
+        results = await self.search(items)
+        self.assertEqual([items[i]['name'] for i in (0, 2, 3)], [r['name'] for r in results])
+        self.assertEqual('Tracker', results[0]['provider'])
+        self.assertTrue(all(r['provider'] == 'Tracker (string 32755)' for r in results[1:]))
+
+    async def test_fallback_after_exact_link_fails_respects_result_limit(self):
+        broken = torrent('Death Comes to Pemberley S01E01', uri='magnet:?xt=invalid')
+        backup = self.item('Death Comes to Pemberley season pack', 'b', 8)
+        extra = self.item('Смерть приходит в Пемберли HDTV', 'c')
+        self.assertEqual([backup], await self.search([broken, backup, extra], max_results=1))
+
+    async def test_enough_exact_matches_needs_no_fallback(self):
+        exact = [self.item(f'Death Comes to Pemberley S01E01 choice {k}', k) for k in 'abc']
+        backup = self.item('Death Comes to Pemberley season pack', 'd', 100)
+        results = await self.search([*exact, backup])
+        self.assertCountEqual([r['name'] for r in exact], [r['name'] for r in results])
 
 
 class WireTests(unittest.IsolatedAsyncioTestCase):

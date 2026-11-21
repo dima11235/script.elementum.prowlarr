@@ -15,10 +15,10 @@ from logger import log
 #  todo for some reason Elementum cannot resolve the link that gets proxied through Prowlarr.
 #  So we will resolve it manually for Elementum for now.
 #  In actuality, this should be fixed within Elementum
-async def uri_to_magnets_uniq_torrents(torrents, p_dialog_cb=None):
+async def uri_to_magnets_uniq_torrents(torrents, p_dialog_cb=None, *, seen=None):
     ret = []
     count = 0
-    hash_set = set()
+    hash_set = set(seen or ())
     async with aiohttp.ClientSession() as session:
         session.headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 ' \
                                         '(KHTML, like Gecko) Chrome/35.0.1916.47 Safari/537.36'
