@@ -501,11 +501,25 @@ class Client:
             if key not in seen:
                 seen.add(key)
                 unique.append(result)
+        # One row per release: the same torrent on several indexers keeps one
+        # line and lists every provider, like the Jackett addon did.
+        merged = {}
+        order = []
+        for result in unique:
+            key = (result['name'], result['_size_bytes'])
+            if key not in merged:
+                merged[key] = result
+                order.append(key)
+            else:
+                combined = merged[key]
+                combined['provider'] += f', {result["provider"]}'
+                combined['seeds'] = max(combined['seeds'], result['seeds'])
+                combined['peers'] = max(combined['peers'], result['peers'])
         # Bound work by the result limit. Try spare candidates when a proxy fails.
-        for start in range(0, min(len(unique), limit * 2), 6):
+        for start in range(0, min(len(order), limit * 2), 6):
             if len(results) >= limit:
                 break
-            batch = unique[start:min(start + 6, limit * 2)]
+            batch = [merged[key] for key in order[start:min(start + 6, limit * 2)]]
             urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline), batch)
             for result, uri in zip(batch, urls):
                 if not uri:

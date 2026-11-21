@@ -207,17 +207,33 @@ class ProwlarrTests(unittest.TestCase):
         client, _ = self.client()
         base = {'name': 'Movie 1080p WEB-DL', 'provider': 'Tracker', 'seeds': 5, 'peers': 7,
                 'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
-                'resolution': 3, 'release_type': 8, 'category': 'web'}
-        one = {**base, 'uri': '/base/21/download?link=token-one'}
-        two = {**base, 'uri': '/base/21/download?link=token-two'}
+                'resolution': 3, 'release_type': 8, 'category': 'web', 'uri': '/base/21/download?link=one'}
+        two = {**base, 'uri': '/base/21/download?link=two'}
         different = {**base, 'name': 'Movie 720p HDTV', '_size_bytes': 700 * 1024 ** 2,
-                     'uri': '/base/21/download?link=token-three'}
+                     'uri': '/base/21/download?link=three'}
         pool = Mock()
         pool.map = lambda function, batch: [function(item) for item in batch]
-        result = client._resolve_results(pool, [one, two, different], limit=10)
+        result = client._resolve_results(pool, [base, two, different], limit=10)
         self.assertEqual(2, len(result))
         self.assertEqual(['Movie 1080p WEB-DL', 'Movie 720p HDTV'],
                          sorted(item['name'] for item in result))
+        self.assertEqual('Tracker', result[0]['provider'])
+
+    def test_same_release_on_two_providers_merges_into_one_row(self):
+        client, _ = self.client()
+        base = {'name': 'Movie 1080p WEB-DL', 'provider': 'RuTracker.org', 'seeds': 5, 'peers': 7,
+                'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
+                'resolution': 3, 'release_type': 8, 'category': 'web',
+                'uri': 'magnet:?xt=urn:btih:' + 'a' * 40}
+        other = {**base, 'provider': '1337x', 'seeds': 12, 'peers': 20,
+                 'uri': 'magnet:?xt=urn:btih:' + 'b' * 40}
+        pool = Mock()
+        pool.map = lambda function, batch: [function(item) for item in batch]
+        result = client._resolve_results(pool, [base, other], limit=10)
+        self.assertEqual(1, len(result))
+        self.assertEqual('RuTracker.org, 1337x', result[0]['provider'])
+        self.assertEqual(12, result[0]['seeds'])
+        self.assertEqual(20, result[0]['peers'])
 
     def test_no_enabled_indexer_is_reported(self):
         client = api.Client('http://prowlarr.example', 'synthetic', transport=Mock(return_value=[]))
