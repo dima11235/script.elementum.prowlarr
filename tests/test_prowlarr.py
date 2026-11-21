@@ -1,11 +1,15 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
+import sys
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +39,11 @@ class ProwlarrTests(unittest.TestCase):
                     {'id': 0, 'enable': True, 'protocol': 'torrent'},
                     {'id': 22, 'enable': False, 'protocol': 'torrent'},
                     {'id': 23, 'enable': True, 'protocol': 'usenet'}]
+        if resources is None:
+            resources = []
         transport = Mock(side_effect=lambda endpoint, params=None:
                          indexers if endpoint.endswith('indexer') else
-                         [] if endpoint.endswith('indexerstatus') else resources or [])
+                         [] if endpoint.endswith('indexerstatus') else resources)
         return api.Client('https://prowlarr.example/base', 'synthetic', transport=transport), transport
 
     def test_real_torrent_indexers_and_movie_categories(self):
@@ -51,6 +57,146 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual(7, results[0]['peers'])
         self.assertEqual(3, results[0]['resolution'])
         self.assertEqual(8, results[0]['release_type'])
+
+    def test_media_uses_per_indexer_torznab_and_survives_an_indexer_error(self):
+        indexers = [
+            {'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'First',
+             'capabilities': {'tvSearchParams': ['q', 'season', 'ep']}},
+            {'id': 22, 'enable': True, 'protocol': 'torrent', 'name': 'Second',
+             'capabilities': {'tvSearchParams': ['q', 'season']}},
+        ]
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+        xml = f'''<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+            <item><title>Show S01E02</title><size>1048576</size>
+                <enclosure url="{magnet}" length="1048576"/>
+                <torznab:attr name="seeders" value="3"/>
+                <torznab:attr name="peers" value="8"/>
+            </item>
+            <item><title>Show S01E03</title><link>{magnet}</link></item>
+        </channel></rss>'''
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return indexers
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            if '/22/' in endpoint:
+                raise api.ProwlarrError('Prowlarr indexers are temporarily unavailable (HTTP 429)')
+            return ElementTree.fromstring(xml)
+
+        fetch = Mock(side_effect=transport)
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=fetch)
+        results = client.search_media({'title': 'Show', 'season': 1, 'episode': 2}, kind='episode')
+        self.assertEqual(['Show S01E02'], [item['name'] for item in results])
+        self.assertEqual(('First', 3, 8, magnet),
+                         tuple(results[0][key] for key in ('provider', 'seeds', 'peers', 'uri')))
+        fetch.assert_any_call('api/v1/indexer/21/newznab', {'t': 'tvsearch', 'q': 'Show', 'season': 1, 'ep': 2})
+        fetch.assert_any_call('api/v1/indexer/22/newznab', {'t': 'tvsearch', 'q': 'Show S01E02'})
+
+    def test_progress_reports_fast_indexer_while_slow_indexer_is_pending(self):
+        slow_can_finish = Event()
+        indexers = [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'Slow'},
+                    {'id': 22, 'enable': True, 'protocol': 'torrent', 'name': 'Fast'}]
+        events = []
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return indexers
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            if '/21/' in endpoint:
+                self.assertTrue(slow_can_finish.wait(timeout=3))
+                raise api.ProwlarrError('Unavailable')
+            return ElementTree.fromstring('<rss><channel><item><title>Movie</title></item></channel></rss>')
+
+        def progress(percent, event, *args):
+            events.append((percent, event, *args))
+            if event == 'indexer_results' and args[0] == 'Fast':
+                slow_can_finish.set()
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        client.search_media('Movie', progress=progress)
+        self.assertEqual([
+            (5, 'indexers', 'Slow, Fast'),
+            (42, 'indexer_results', 'Fast', 1),
+            (80, 'indexer_error', 'Slow'),
+        ], events)
+
+    def test_kodi_dialog_shows_count_and_closes_on_success_and_error(self):
+        gui = Mock()
+        settings = Mock()
+        settings.getSettingInt.return_value = 0
+        settings.getLocalizedString.side_effect = {
+            32064: 'Starting', 32065: 'Checking: {}', 32069: 'Returned: {}',
+        }.get
+        addon_api = Mock()
+        addon_api.Addon.return_value = settings
+        with patch.dict(sys.modules, {'xbmc': Mock(), 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}):
+            with patch.object(sys, 'path', sys.path[:]):
+                addon = load('addon_tested', ROOT / 'addon.py')
+
+        def search_media(*_args, progress, **_kwargs):
+            progress(5, 'indexers', 'Tracker')
+            return [{'name': 'Movie'}]
+
+        client = Mock()
+        with patch.object(addon, 'client', return_value=client):
+            client.search_media.side_effect = search_media
+            self.assertEqual([{'name': 'Movie'}], addon.search('Movie'))
+            gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
+            gui.Dialog.return_value.notification.assert_called_once_with('Elementum Prowlarr', 'Returned: 1', time=4000)
+            client.search_media.side_effect = api.ProwlarrError('Unavailable')
+            self.assertEqual([], addon.search('Movie'))
+        self.assertEqual(2, gui.DialogProgressBG.return_value.close.call_count)
+
+    def test_torznab_movie_uses_typed_year_when_available(self):
+        movie = ('Movie', 2001, None, None)
+        indexer = {'capabilities': {'movieSearchParams': ['q', 'year']}}
+        self.assertEqual({'t': 'movie', 'q': 'Movie', 'year': 2001}, api.torznab_params(indexer, 'movie', movie))
+        self.assertEqual({'t': 'search', 'q': 'Movie 2001'}, api.torznab_params({}, 'movie', movie))
+
+    def test_proxy_resolves_magnet_and_rejects_credentials_in_external_redirects(self):
+        client, _ = self.client()
+        proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+        for location, expected in ((magnet, magnet),
+                                   ('https://tracker.example/item?key=%73ynthetic', None)):
+            opener = Mock()
+            opener.open.side_effect = HTTPError(proxy, 302, '', {'Location': location}, io.BytesIO())
+            with patch.object(api, 'build_opener', return_value=opener):
+                self.assertEqual(expected, client.resolve_proxy_magnet(proxy))
+            self.assertEqual(1, opener.open.call_count)
+            self.assertEqual({}, opener.open.call_args.args[0].headers)
+
+    def test_proxy_preserves_torrent_url(self):
+        client, _ = self.client()
+        proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
+        opener = Mock()
+        response = opener.open.return_value
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.headers.get_content_type.return_value = 'application/x-bittorrent'
+        with patch.object(api, 'build_opener', return_value=opener):
+            self.assertEqual(proxy, client.resolve_proxy_magnet(proxy))
+
+    def test_media_tries_another_source_with_same_hash_when_proxy_fails(self):
+        digest = 'a' * 40
+        magnet = 'magnet:?xt=urn:btih:' + digest
+        root = ElementTree.fromstring(f'''<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+            <item><title>Movie fast</title><link>/base/21/download?link=missing</link>
+                <torznab:attr name="seeders" value="50"/>
+                <torznab:attr name="infohash" value="{digest}"/>
+            </item>
+            <item><title>Movie playable</title><link>{magnet}</link>
+                <torznab:attr name="seeders" value="3"/>
+            </item>
+        </channel></rss>''')
+        client, _ = self.client(root)
+        opener = Mock()
+        opener.open.side_effect = HTTPError('https://prowlarr.example', 502, '', {}, io.BytesIO())
+        with patch.object(api, 'build_opener', return_value=opener):
+            result = client.search_media('Movie', limit=1)
+        self.assertEqual([magnet], [item['uri'] for item in result])
 
     def test_no_enabled_indexer_is_reported(self):
         client = api.Client('http://prowlarr.example', 'synthetic', transport=Mock(return_value=[]))
@@ -165,20 +311,89 @@ class ProwlarrTests(unittest.TestCase):
             results = client.search(['Movie'], sort_by=mode, limit=1)
             self.assertEqual(expected_name, results[0]['name'], mode)
 
-    def test_season_episode_params_only_for_capable_indexers(self):
-        capable = {'id': 21, 'enable': True, 'protocol': 'torrent', 'supportsSearch': True,
-                   'capabilities': {'tvSearchParams': ['q', 'season', 'ep']}}
-        client, transport = self.client([release()])
-        client.search(['Show S01E02'], kind='episode', season=1, episode=2)
-        self.assertNotIn('season', transport.call_args.args[1])
-        resources = [capable]
-        transport = Mock(side_effect=lambda endpoint, params=None:
-                         resources if endpoint.endswith('indexer') else
-                         [] if endpoint.endswith('indexerstatus') else [release()])
-        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
-        client.search(['Show S01E02'], kind='episode', season=1, episode=2)
-        self.assertEqual(1, transport.call_args.args[1].get('season'))
-        self.assertEqual(2, transport.call_args.args[1].get('episode'))
+    def test_tv_search_uses_query_and_filters_wrong_episodes(self):
+        client, transport = self.client([
+            release(title='Show S01E02', infoHash='a' * 40),
+            release(title='Show S01E03', infoHash='b' * 40),
+            release(title='Show S02E02', infoHash='c' * 40),
+            release(title='Show Season 1', infoHash='d' * 40),
+        ])
+        results = client.search(['Show S01E02'], kind='episode', season=1, episode=2)
+        self.assertEqual(['Show S01E02'], [item['name'] for item in results])
+        self.assertEqual({'query': 'Show S01E02', 'type': 'search',
+                          'indexerIds': [21], 'categories': [5000]}, transport.call_args.args[1])
+
+    def test_tv_broad_fallback_requires_matching_episode_or_pack(self):
+        client, transport = self.client()
+        client.indexers()
+        transport.side_effect = [[], [release(title='Other 2020')],
+                                 [release(title='Show S01E01-E03')]]
+        payload = {'title': 'Show', 'year': 2020, 'season_year': 2019, 'show_year': 2019}
+        result = client.search(['Show S01E02'], kind='episode', season=1, episode=2,
+                               fallback_queries=api.tv_fallback_queries(payload, ''))
+        self.assertEqual(['Show S01E01-E03'], [item['name'] for item in result])
+        self.assertEqual('Show 2019', transport.call_args.args[1]['query'])
+
+    def test_season_query_accepts_matching_pack_when_enabled(self):
+        client, transport = self.client()
+        client.indexers()
+        transport.side_effect = [[], [release(title='Show Season 1'),
+                                     release(title='Show Season 2', infoHash='b' * 40),
+                                     release(title='Show 2020', infoHash='c' * 40)]]
+        result = client.search(['Show S01E02', 'Show S01'], kind='episode', season=1, episode=2,
+                               allow_season_pack=True)
+        self.assertEqual(['Show Season 1'], [item['name'] for item in result])
+
+    def test_episode_fallback_recognizes_localized_and_compact_titles(self):
+        candidates = [
+            'Show 1x02',
+            'Show.S01E01E02.1080p',
+            'Шоу (1 сезон, серии 1–4 из 8)',
+            'Шоу Сезон: 1 / Серия: 2',
+            'Show 1x03',
+            'Show.S01E01E03.1080p',
+            'Шоу Сезон 1 [Серии 3-8]',
+            'Шоу 2 сезон, серия 2',
+        ]
+        client, transport = self.client()
+        client.indexers()
+        transport.side_effect = [[], [
+            release(title=title, infoHash=f'{index:040x}')
+            for index, title in enumerate(candidates)
+        ]]
+        result = client.search(['Show S01E02'], kind='episode', season=1, episode=2,
+                               fallback_queries=['Show'], allow_season_pack=True)
+        self.assertCountEqual(candidates[:4], [item['name'] for item in result])
+
+    def test_season_search_does_not_treat_numbered_episodes_as_packs(self):
+        client, _ = self.client([
+            release(title='Шоу 1 сезон 1080p', infoHash='a' * 40),
+            release(title='Шоу Сезон 1, серия 2', infoHash='b' * 40),
+            release(title='Show 1x02', infoHash='c' * 40),
+            release(title='Show.S01E02-1080p', infoHash='d' * 40),
+        ])
+        result = client.search(['Show S01'], kind='season', season=1)
+        self.assertEqual(['Шоу 1 сезон 1080p'], [item['name'] for item in result])
+
+    def test_optional_search_error_keeps_primary_results(self):
+        client, transport = self.client()
+        client.indexers()
+        transport.side_effect = [[release(title='Show S01E02')], api.ProwlarrError('HTTP 429')]
+        result = client.search(['Show S01E02', 'Show S01'], kind='episode', season=1, episode=2,
+                               allow_season_pack=True)
+        self.assertEqual(['Show S01E02'], [item['name'] for item in result])
+
+    def test_deduplicates_magnets_with_different_parameters(self):
+        uri = 'magnet:?xt=urn:btih:' + 'a' * 40
+        client, _ = self.client([release(magnetUrl=uri + '&dn=one', infoHash=None),
+                                 release(magnetUrl=uri + '&dn=two', seeders=10)])
+        results = client.search(['Movie'])
+        self.assertEqual([10], [item['seeds'] for item in results])
+
+    def test_english_title_fallback(self):
+        payload = {'title': 'Фильм', 'titles': {'en': 'Movie', 'ru': 'Фильм'}}
+        self.assertEqual('Movie', api.title_from_payload(payload))
+        self.assertEqual('Фильм', api.title_from_payload(payload, 'ru'))
 
     def test_null_numeric_fields(self):
         client, _ = self.client()

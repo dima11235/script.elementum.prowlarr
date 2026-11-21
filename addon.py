@@ -7,9 +7,11 @@ import xbmcaddon
 import xbmcgui
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'resources', 'lib'))
-from prowlarr import Client, ProwlarrError, search_queries  # noqa: E402
+from prowlarr import Client, ProwlarrError  # noqa: E402
 
 ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
+ADDON_NAME = 'Elementum Prowlarr'
+PROGRESS_MESSAGES = {'indexers': 32065, 'indexer_results': 32066, 'indexer_error': 32067, 'links': 32068}
 
 SORT_MODES = ('resolution', 'seeds', 'size', 'balanced')
 RESOLUTION_SETTINGS = ((5, 'include_resolution_2160'), (4, 'include_resolution_1440'),
@@ -40,22 +42,24 @@ def size_range(kind):
 
 
 def included(mapping):
-    included_items = {value for value, setting in mapping if ADDON.getSettingBool(setting)}
-    return included_items or None
+    return {value for value, setting in mapping if ADDON.getSettingBool(setting)}
 
 
 def search(payload, kind='search'):
+    progress = xbmcgui.DialogProgressBG()
+
+    def update(percent, event, *args):
+        progress.update(percent, message=localize(PROGRESS_MESSAGES[event]).format(*args))
+
     try:
+        progress.create(ADDON_NAME, localize(32064))
         language = xbmc.getLanguage(xbmc.ISO_639_1) if ADDON.getSettingBool('localized_titles') else ''
-        queries = search_queries(payload, kind, language,
-                                 season_fallback=ADDON.getSettingBool('season_fallback'))
-        if not queries:
-            return []
-        results = client().search(
-            queries, kind=kind, limit=ADDON.getSettingInt('max_results'),
+        allow_season_pack = ADDON.getSettingBool('season_fallback')
+        results = client().search_media(
+            payload, kind=kind, language=language, limit=ADDON.getSettingInt('max_results'),
+            progress=update,
             min_seeders=ADDON.getSettingInt('min_seeders'),
-            season=payload.get('season') if isinstance(payload, dict) else None,
-            episode=payload.get('episode') if isinstance(payload, dict) else None,
+            allow_season_pack=allow_season_pack,
             size_ranges={kind: size_range(kind)} if kind in ('movie', 'season', 'episode') else None,
             include_unknown_size=ADDON.getSettingBool('include_unknown_size'),
             include_resolutions=included(RESOLUTION_SETTINGS),
@@ -63,15 +67,19 @@ def search(payload, kind='search'):
             require_keywords=ADDON.getSetting('require_keywords'),
             exclude_keywords=ADDON.getSetting('exclude_keywords'),
             sort_by=SORT_MODES[max(0, min(3, ADDON.getSettingInt('sort_by')))])
-        xbmc.log(f'Elementum Prowlarr: returned {len(results)} results', xbmc.LOGINFO)
-        return results
     except ProwlarrError as error:
         xbmc.log(f'Elementum Prowlarr: {error}', xbmc.LOGWARNING)
-        xbmcgui.Dialog().notification('Elementum Prowlarr', str(error), time=6000)
+        xbmcgui.Dialog().notification(ADDON_NAME, str(error), time=6000)
     except Exception as error:
         # Never log payloads, API keys, download URLs or raw exception messages.
         xbmc.log(f'Elementum Prowlarr: {type(error).__name__}', xbmc.LOGERROR)
-        xbmcgui.Dialog().notification('Elementum Prowlarr', localize(32021), time=6000)
+        xbmcgui.Dialog().notification(ADDON_NAME, localize(32021), time=6000)
+    else:
+        xbmc.log(f'Elementum Prowlarr: returned {len(results)} results', xbmc.LOGINFO)
+        xbmcgui.Dialog().notification(ADDON_NAME, localize(32069).format(len(results)), time=4000)
+        return results
+    finally:
+        progress.close()
     return []
 
 
