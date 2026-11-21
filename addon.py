@@ -11,7 +11,8 @@ from prowlarr import Client, ProwlarrError  # noqa: E402
 
 ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
 ADDON_NAME = 'Elementum Prowlarr'
-PROGRESS_MESSAGES = {'indexers': 32065, 'indexer_results': 32066, 'indexer_error': 32067, 'links': 32068}
+PROGRESS_MESSAGES = {'indexers': 32065, 'cooldown': 32072, 'indexer_results': 32066,
+                     'indexer_error': 32067, 'links': 32068}
 
 SORT_MODES = ('resolution', 'seeds', 'size', 'balanced')
 RESOLUTION_SETTINGS = ((5, 'include_resolution_2160'), (4, 'include_resolution_1440'),

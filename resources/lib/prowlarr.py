@@ -258,6 +258,7 @@ class Client:
         self.timeout = max(5, min(180, integer(timeout, 60)))
         self.transport = transport or self._request
         self._indexers = None
+        self._cooldowns = []
 
     def _request(self, endpoint, params=None):
         torznab = endpoint.endswith('/newznab')
@@ -293,7 +294,7 @@ class Client:
             if not isinstance(resources, list):
                 raise ProwlarrError('Prowlarr returned an invalid indexer list')
             statuses = self.transport('api/v1/indexerstatus')
-            blocked = set()
+            blocked = {}
             if not isinstance(statuses, list):
                 raise ProwlarrError('Prowlarr returned an invalid indexer status list')
             for status in statuses:
@@ -303,16 +304,24 @@ class Client:
                 try:
                     deadline = datetime.fromisoformat(until.replace('Z', '+00:00'))
                     if deadline.replace(tzinfo=deadline.tzinfo or timezone.utc) > datetime.now(timezone.utc):
-                        blocked.add(integer(status.get('indexerId')))
+                        blocked[integer(status.get('indexerId'))] = deadline
                 except (AttributeError, ValueError, TypeError):
                     continue
             self._indexers = []
+            self._cooldowns = []
             for resource in resources:
+                identifier = integer(resource.get('id'))
                 if not isinstance(resource, dict) or not resource.get('enable') \
                         or resource.get('protocol') != 'torrent' \
                         or resource.get('supportsSearch') is False \
-                        or integer(resource.get('id')) <= 0 \
-                        or integer(resource.get('id')) in blocked:
+                        or identifier <= 0:
+                    continue
+                if identifier in blocked:
+                    # Cooldown indexers stay visible in the progress window
+                    # instead of silently disappearing from the results.
+                    self._cooldowns.append(
+                        f'{resource.get("name") or identifier} '
+                        f'{blocked[identifier].astimezone().strftime("%H:%M")}')
                     continue
                 self._indexers.append(resource)
         if not self._indexers:
@@ -463,6 +472,8 @@ class Client:
         if progress is None:
             def progress(*_args):
                 pass
+        if self._cooldowns:
+            progress(3, 'cooldown', ', '.join(self._cooldowns))
         per_query = len(indexers)
         total = per_query * len(dict.fromkeys((*primary, *fallback)))
         requested = 0

@@ -256,6 +256,27 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual(1, len(client.search(['Movie'])))
         self.assertEqual([23], transport.call_args.args[1]['indexerIds'])
 
+    def test_cooldown_indexer_is_shown_in_progress_window(self):
+        rss = ElementTree.fromstring(
+            '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>'
+            '<item><title>Movie 1080p WEB-DL</title>'
+            '<torznab:attr name="seeders" value="7"/></item>'
+            '</channel></rss>')
+        transport = Mock(side_effect=[
+            [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'RuTracker.org'},
+             {'id': 23, 'enable': True, 'protocol': 'torrent', 'name': 'Other'}],
+            [{'indexerId': 21, 'disabledTill': '2099-01-01T00:00:00Z'}],
+            rss, rss,
+        ])
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        events = []
+        client.search_media('Movie', progress=lambda *args: events.append(args))
+        cooldown = [event for event in events if event[1] == 'cooldown']
+        self.assertEqual(1, len(cooldown))
+        self.assertEqual(3, cooldown[0][0])
+        self.assertIn('RuTracker.org', cooldown[0][2])
+        self.assertNotIn(21, [indexer['id'] for indexer in client.indexers()])
+
     def test_queries(self):
         self.assertEqual(['Matrix'], api.search_queries('Matrix'))
         self.assertEqual(['Movie 1999'], api.search_queries({'title': 'Movie', 'year': 1999}, 'movie'))

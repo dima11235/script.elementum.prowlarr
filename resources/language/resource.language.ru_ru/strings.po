@@ -187,3 +187,7 @@ msgctxt "#32068"
 msgid "Checking download links…"
 msgstr "Проверяю ссылки на раздачи…"
 
+msgctxt "#32072"
+msgid "Paused by trackers: {}"
+msgstr "Трекеры в паузе: {}"
+
