@@ -1,42 +1,89 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <settings>
+  <!-- General -->
   <category label="32000">
-    <setting id="host" type="text" label="32001" default="http://localhost:9696"/>
-    <setting id="api_key" type="text" label="32002" option="hidden" default=""/>
-    <setting type="action" label="32003" action="RunScript(script.elementum.prowlarr,test)" option="close"/>
-    <setting id="timeout" type="slider" label="32004" default="60" range="5,5,180" option="int"/>
+    <setting label="32001" type="text" id="host" default="http://localhost:9696" />
+    <setting label="32002" type="text" id="api_key" option="hidden" default="" />
+    <setting label="32003" type="text" id="elementum.prowlarr.settings_validated" default="" enable="false" />
+    <setting label="32004" type="action" action="RunScript(script.elementum.prowlarr, validate_settings)" option="close" />
+    <setting label="32007" type="bool" id="elementum.prowlarr.search_by_imdb_key" default="false" />
+    <setting label="32010" type="bool" id="elementum.prowlarr.kodi_language" default="true" />
+    <setting label="32008" id="elementum.prowlarr.max_results" type="slider" default="20" option="int" range="5,5,200" />
   </category>
-  <category label="32010">
-    <setting id="max_results" type="slider" label="32011" default="50" range="5,5,200" option="int"/>
-    <setting id="min_seeders" type="number" label="32012" default="1"/>
-    <setting id="sort_by" type="enum" label="32030" lvalues="32031|32032|32033|32034" default="0"/>
-    <setting id="localized_titles" type="bool" label="32014" default="true"/>
-    <setting id="season_fallback" type="bool" label="32015" default="true"/>
-  </category>
+
+  <!-- Filtering -->
   <category label="32050">
-    <setting id="include_unknown_size" type="bool" label="32040" default="true"/>
-    <setting id="movie_size_min" type="number" label="32041" default="0"/>
-    <setting id="movie_size_max" type="number" label="32042" default="0"/>
-    <setting id="season_size_min" type="number" label="32043" default="0"/>
-    <setting id="season_size_max" type="number" label="32044" default="0"/>
-    <setting id="episode_size_min" type="number" label="32045" default="0"/>
-    <setting id="episode_size_max" type="number" label="32046" default="0"/>
+    <setting label="32051" type="lsep" />
+    <setting label="32052" id="elementum.prowlarr.sort_by" type="enum" lvalues="32053|32054|32055|32056" default="3" />
+    <setting label="32057" id="elementum.prowlarr.filter_exclude_no_seed" type="bool" default="true" />
+    <setting label="32058" id="elementum.prowlarr.search_season_on_episode" type="bool" default="true" />
+    <setting label="32059" id="elementum.prowlarr.use_smart_show_filter" type="bool" default="true" />
+
+    <setting label="32100" type="lsep"/>
+    <setting label="32101" id="elementum.prowlarr.filter_keywords_enabled" type="bool" default="false" />
+    <setting type="sep"/>
+    <!--
+    todo maybe add this:
+     Use underscores around keywords to require a space/dot, eg. _HEVC_
+     <setting label="32037" id="elementum.prowlarr.filtering_help" type="text" enable="false" visible="eq(-2,true)" />
+    -->
+    <setting label="32102" id="elementum.prowlarr.keywords_block" type="text" default="" visible="eq(-2,true)" />
+    <setting label="32103" id="elementum.prowlarr.keywords_require" type="text" default="" visible="eq(-3,true)" />
+
+    <setting label="32150" type="lsep"/>
+    <setting label="32151" id="elementum.prowlarr.filter_size_enabled" type="bool" default="false" />
+    <setting type="sep"/>
+    <setting label="32152" id="elementum.prowlarr.size_include_unknown" type="bool" default="true" visible="eq(-2,true)" />
+    <setting label="32153" id="elementum.prowlarr.size_min" type="slider" option="float" range="0,0.25,100" default="0" visible="eq(-3,true)" />
+    <setting label="32154" id="elementum.prowlarr.size_max" type="slider" option="float" range="1,1,200" default="100" visible="eq(-4,true)" />
+    <setting label="32155" id="elementum.prowlarr.size_movie_min" type="slider" option="float" range="0,0.25,100" default="0.5" visible="eq(-5,true)" />
+    <setting label="32156" id="elementum.prowlarr.size_movie_max" type="slider" option="float" range="1,1,200" default="30" visible="eq(-6,true)" />
+    <setting label="32157" id="elementum.prowlarr.size_season_min" type="slider" option="float" range="0,0.5,100" default="0.5" visible="eq(-7,true)" />
+    <setting label="32158" id="elementum.prowlarr.size_season_max" type="slider" option="float" range="1,1,200" default="10" visible="eq(-8,true)" />
+    <setting label="32159" id="elementum.prowlarr.size_episode_min" type="slider" option="float" range="0,0.1,100" default="0" visible="eq(-9,true)" />
+    <setting label="32160" id="elementum.prowlarr.size_episode_max" type="slider" option="float" range="1,0.1,200" default="1" visible="eq(-10,true)" />
+
+    <setting label="32200" type="lsep"/>
+    <setting label="32201" id="elementum.prowlarr.filter_include_resolution_enabled" type="bool" default="true" />
+    <setting type="sep"/>
+    <setting label="32202" id="elementum.prowlarr.include_resolution_4k" type="bool" default="true" visible="eq(-2,true)" />
+    <setting label="32203" id="elementum.prowlarr.include_resolution_2k" type="bool" default="true" visible="eq(-3,true)" />
+    <setting label="32204" id="elementum.prowlarr.include_resolution_1080p" type="bool" default="true" visible="eq(-4,true)" />
+    <setting label="32205" id="elementum.prowlarr.include_resolution_720p" type="bool" default="true" visible="eq(-5,true)" />
+    <setting label="32206" id="elementum.prowlarr.include_resolution_480p" type="bool" default="true" visible="eq(-6,true)" />
+    <setting label="32207" id="elementum.prowlarr.include_resolution_240p" type="bool" default="false" visible="eq(-7,true)" />
+    <setting label="32208" id="elementum.prowlarr.include_resolution_unknown" type="bool" default="true" visible="eq(-8,true)" />
+
+    <setting label="32250" type="lsep"/>
+    <setting label="32251" id="elementum.prowlarr.filter_include_release" type="bool" default="true" />
+    <setting type="sep"/>
+    <setting label="32252" id="elementum.prowlarr.include_release_brrip" type="bool" default="true" visible="eq(-2,true)"/>
+    <setting label="32253" id="elementum.prowlarr.include_release_webdl" type="bool" default="true" visible="eq(-3,true)"/>
+    <setting label="32254" id="elementum.prowlarr.include_release_hdrip" type="bool" default="true" visible="eq(-4,true)"/>
+    <setting label="32255" id="elementum.prowlarr.include_release_hdtv" type="bool" default="true" visible="eq(-5,true)"/>
+    <setting label="32256" id="elementum.prowlarr.include_release_dvd" type="bool" default="true" visible="eq(-6,true)"/>
+    <setting label="32257" id="elementum.prowlarr.include_release_h26x" type="bool" default="true" visible="eq(-7,true)"/>
+    <setting label="32258" id="elementum.prowlarr.include_release_dvdscr" type="bool" default="true" visible="eq(-8,true)"/>
+    <setting label="32259" id="elementum.prowlarr.include_release_screener" type="bool" default="true" visible="eq(-9,true)"/>
+    <setting label="32260" id="elementum.prowlarr.include_release_3d" type="bool" default="false" visible="eq(-10,true)"/>
+    <setting label="32261" id="elementum.prowlarr.include_release_telesync" type="bool" default="false" visible="eq(-11,true)"/>
+    <setting label="32262" id="elementum.prowlarr.include_release_cam" type="bool" default="false" visible="eq(-12,true)"/>
+    <setting label="32263" id="elementum.prowlarr.include_release_tvrip" type="bool" default="true" visible="eq(-13,true)"/>
+    <setting label="32264" id="elementum.prowlarr.include_release_iptvrip" type="bool" default="true" visible="eq(-14,true)"/>
+    <setting label="32265" id="elementum.prowlarr.include_release_vhsrip" type="bool" default="false" visible="eq(-15,true)"/>
+    <setting label="32266" id="elementum.prowlarr.include_release_trailer" type="bool" default="false" visible="eq(-16,true)"/>
+    <setting label="32267" id="elementum.prowlarr.include_release_workprint" type="bool" default="false" visible="eq(-17,true)"/>
+    <setting label="32268" id="elementum.prowlarr.include_release_line" type="bool" default="false" visible="eq(-18,true)"/>
+    <setting label="32269" id="elementum.prowlarr.include_release_unknown" type="bool" default="true" visible="eq(-19,true)"/>
   </category>
-  <category label="32070">
-    <setting id="require_keywords" type="text" label="32016" default=""/>
-    <setting id="exclude_keywords" type="text" label="32017" default=""/>
-    <setting id="include_resolution_2160" type="bool" label="32051" default="true"/>
-    <setting id="include_resolution_1440" type="bool" label="32052" default="true"/>
-    <setting id="include_resolution_1080p" type="bool" label="32053" default="true"/>
-    <setting id="include_resolution_720p" type="bool" label="32054" default="true"/>
-    <setting id="include_resolution_480p" type="bool" label="32055" default="true"/>
-    <setting id="include_resolution_unknown" type="bool" label="32056" default="true"/>
-    <setting id="include_release_bluray" type="bool" label="32057" default="true"/>
-    <setting id="include_release_web" type="bool" label="32058" default="true"/>
-    <setting id="include_release_hdtv" type="bool" label="32059" default="true"/>
-    <setting id="include_release_dvd" type="bool" label="32060" default="true"/>
-    <setting id="include_release_tvrip" type="bool" label="32061" default="true"/>
-    <setting id="include_release_unknown" type="bool" label="32062" default="true"/>
-    <setting id="include_release_screener" type="bool" label="32063" default="false"/>
+
+  <!-- Advanced -->
+  <category label="32300">
+    <setting label="32301" type="lsep"/>
+    <setting label="32302" type="bool" id="elementum.prowlarr.enable_debugger" default="false" />
+    <!--todo might need to add an option for directories-->
+    <setting label="32303" type="file" id="elementum.prowlarr.debugger_additional_libraries" default="" visible="eq(-1,true)" />
+    <setting label="32304" type="text" id="elementum.prowlarr.debugger_host" default="localhost" visible="eq(-2,true)" />
+    <setting label="32305" type="text" id="elementum.prowlarr.debugger_port" default="5678" visible="eq(-3,true)" />
   </category>
 </settings>

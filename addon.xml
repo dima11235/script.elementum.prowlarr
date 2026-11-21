@@ -1,19 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<addon id="script.elementum.prowlarr" name="Elementum Prowlarr" version="0.3.14" provider-name="Elementum Prowlarr contributors">
-  <requires>
-    <import addon="xbmc.python" version="3.0.0"/>
-    <import addon="plugin.video.elementum" version="0.1.119"/>
-  </requires>
-  <extension point="xbmc.python.script" library="addon.py">
-    <provides>executable</provides>
-  </extension>
-  <extension point="xbmc.addon.metadata">
-    <summary lang="en_GB">Search your Prowlarr indexers with Elementum</summary>
-    <summary lang="ru_RU">Поиск через Prowlarr для Elementum</summary>
-    <description lang="en_GB">Independent Prowlarr provider for Elementum. Uses enabled torrent indexers, supports movies, seasons and episodes. Configure your own Prowlarr URL and API key.</description>
-    <description lang="ru_RU">Отдельный провайдер Elementum для Prowlarr. Поиск фильмов, сезонов и серий через включённые torrent-индексаторы. Укажите адрес своего Prowlarr и API-ключ в настройках.</description>
-    <license>MIT</license>
-    <platform>all</platform>
-    <news>0.3.13: finish within the Elementum search timeout and return results already available.</news>
-  </extension>
+<addon id="script.elementum.prowlarr" name="Elementum [COLOR FF0291F7]Prowlarr[/COLOR]" version="0.4.0" provider-name="Elementum Prowlarr contributors; based on script.elementum.jackett by fugkco">
+      <requires>
+            <import addon="xbmc.python" version="3.0.0"/>
+            <import addon="plugin.video.elementum"/>
+            <import addon="script.module.urllib3"/>
+            <import addon="script.module.kodi-six"/>
+      </requires>
+      <extension point="xbmc.python.script" library="src/main.py">
+            <provides>executable</provides>
+      </extension>
+      <extension point="xbmc.addon.metadata">
+            <summary lang="en">Elementum Prowlarr provider</summary>
+            <description lang="en">Elementum Prowlarr is a provider that connects Elementum to Prowlarr. You need to run your own Prowlarr server. Ported from script.elementum.jackett by fugkco.</description>
+            <license>WTFPL, Version 2</license>
+            <website>https://github.com/dima11235/script.elementum.prowlarr</website>
+            <source>https://github.com/dima11235/script.elementum.prowlarr</source>
+            <assets>
+                  <icon>resources/images/icon.png</icon>
+            </assets>
+        <news>[B]0.4.0[/B] (2026-11-21)
+
+Port of the proven script.elementum.jackett engine, adapted for the Prowlarr API.
+</news>  </extension>
 </addon>
