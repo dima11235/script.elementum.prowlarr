@@ -261,17 +261,20 @@ class ProwlarrClient:
             result.append(torrents)
         return result
 
-    async def search_movie(self, title, year=None, imdb_id=None, p_dialog_cb=None):
-        tasks = [self.search_by_indexer(ind, SearchType.MOVIE, title, year, imdb_id=imdb_id) for ind in self.indexers]
+    async def search_movie(self, titles, year=None, imdb_id=None, p_dialog_cb=None):
+        titles = (titles,) if isinstance(titles, str) else titles
+        tasks = [self.search_by_indexer(ind, SearchType.MOVIE, title, year, imdb_id=imdb_id)
+                 for ind in self.indexers for title in titles]
         torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
         return utils.concat_dicts(torrent_dicts).values()
 
-    async def search_tv(self, title, year=None, season=None, ep=None, imdb_id=None, p_dialog_cb=None):
-        tasks = [self.search_by_indexer(ind, SearchType.TV, title, year, season, ep, imdb_id) for ind in
-                 self.indexers]
+    async def search_tv(self, titles, year=None, season=None, ep=None, imdb_id=None, p_dialog_cb=None):
+        titles = (titles,) if isinstance(titles, str) else titles
+        tasks = [self.search_by_indexer(ind, SearchType.TV, title, year, season, ep, imdb_id)
+                 for ind in self.indexers for title in titles]
         if get_setting("search_season_on_episode", bool) and bool(season) and bool(ep):
-            tasks += [self.search_by_indexer(ind, SearchType.TV, title, year, season, imdb_id=imdb_id) for ind in
-                      self.indexers]
+            tasks += [self.search_by_indexer(ind, SearchType.TV, title, year, season, imdb_id=imdb_id)
+                      for ind in self.indexers for title in titles]
         torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
         return utils.concat_dicts(torrent_dicts).values()
 
@@ -280,14 +283,18 @@ class ProwlarrClient:
         torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
         return utils.concat_dicts(torrent_dicts).values()
 
-    async def search_tv_smart(self, title, ep_year=None, season_year=None, show_year=None, p_dialog_cb=None):
-        tasks = [self.search_by_indexer(ind, SearchType.TV, title, None) for ind in self.indexers]
+    async def search_tv_smart(self, titles, ep_year=None, season_year=None, show_year=None, p_dialog_cb=None):
+        titles = (titles,) if isinstance(titles, str) else titles
+        years = [None]
         if ep_year and ep_year != season_year:
-            tasks += [self.search_by_indexer(ind, SearchType.TV, title, ep_year) for ind in self.indexers]
+            years.append(ep_year)
         if season_year and season_year != show_year:
-            tasks += [self.search_by_indexer(ind, SearchType.TV, title, season_year) for ind in self.indexers]
+            years.append(season_year)
         if show_year:
-            tasks += [self.search_by_indexer(ind, SearchType.TV, title, show_year) for ind in self.indexers]
+            years.append(show_year)
+        years = tuple(dict.fromkeys(years))
+        tasks = [self.search_by_indexer(ind, SearchType.TV, title, year)
+                 for ind in self.indexers for title in titles for year in years]
         torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
         return utils.concat_dicts(torrent_dicts).values()
 

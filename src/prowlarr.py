@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import time
 import asyncio
+import re
 from kodi_six import xbmc
 
 import addon
@@ -102,7 +103,7 @@ def parse_payload(method, payload):
                 },
             }
 
-    payload['titles'] = dict((k.lower(), v) for k, v in list(payload['titles'].items()))
+    payload['titles'] = {k.lower(): v for k, v in (payload.get('titles') or {}).items()}
 
     if get_setting('kodi_language', bool):
         kodi_language = xbmc.getLanguage(xbmc.ISO_639_1)
@@ -124,6 +125,17 @@ def parse_payload(method, payload):
         else:
             log.warning(f"no original english title found. Using: {payload['title']}")
             payload["search_title"] = payload["title"]
+
+    if method != 'general':
+        original = payload['title']
+        russian = payload['titles'].get('ru') or (original if re.search(r'[а-яё]', original, re.I) else '')
+        english = payload['titles'].get('en') or (original if utils.is_english(original) else '')
+        titles = {}
+        for value in (payload['search_title'], russian, english):
+            title = (value or '').strip()
+            if title:
+                titles.setdefault(title.casefold(), title)
+        payload['search_titles'] = tuple(titles.values())
 
     payload['season_name'] = utils.check_season_name(payload["search_title"], payload.get('season_name', ""))
 
@@ -192,16 +204,17 @@ async def search_prowlarr(p_dialog, payload, method):
         log.debug(f"Processing {method} with Prowlarr")
         p_dialog.update(5, message=utils.translation(32604))
         query_weight = 50
+        titles = payload.get("search_titles", (payload["search_title"],))
         if method == 'movie':
-            res = await j_cli.search_movie(payload["search_title"], payload.get('year'), imdb_id=payload.get("imdb_id"),
+            res = await j_cli.search_movie(titles, payload.get('year'), imdb_id=payload.get("imdb_id"),
                                            p_dialog_cb=p_dialog.callback(query_weight))
         elif method in ('season', 'episode', 'anime'):
             if get_setting("use_smart_show_filter", bool):
-                res = await j_cli.search_tv_smart(payload["search_title"], payload.get('year', None),
+                res = await j_cli.search_tv_smart(titles, payload.get('year', None),
                                                   payload.get('season_year', None), payload.get('show_year', None),
                                                   p_dialog_cb=p_dialog.callback(query_weight))
             else:
-                res = await j_cli.search_tv(payload["search_title"], season=payload.get("season", None),
+                res = await j_cli.search_tv(titles, season=payload.get("season", None),
                                             ep=payload.get("episode", None), imdb_id=payload.get("imdb_id"),
                                             p_dialog_cb=p_dialog.callback(query_weight))
         else:

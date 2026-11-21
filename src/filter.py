@@ -130,6 +130,11 @@ def release_type(results):
     ]
 
 
+EXPLICIT_EPISODE = re.compile(
+    r"(?<![^\W_])(?:s(\d{1,3})e|(\d{1,3})x)(\d{1,4})(?:[-–]e?(\d{1,4}))?(?![^\W_])"
+)
+
+
 def tv_season_episode(results, season, season_name, episode, global_ep, ep_year, season_year=0, start_year=0):
     # Function for sorting large amount of not accurate torrents. Checks year season and episodes.
     # The filtering shouldn't be strict. I'm trying not to lose suitable torrents.
@@ -147,7 +152,11 @@ def tv_season_episode(results, season, season_name, episode, global_ep, ep_year,
         year_pattern = r"(?P<from>(?:19|20)\d{2})(?:\s*-\s*(?P<to>[12]\d{3}))?"
         y = re.search(year_pattern, name)
         if not y:
-            log.debug("No year")
+            for s_marker, x_marker, first, last in EXPLICIT_EPISODE.findall(name):
+                if (episode is not None and int(s_marker or x_marker) == season
+                        and int(first) <= episode <= int(last or first)):
+                    filtered.append(res)
+                    break
             continue
         y_from = int(y.group("from") or "99999")
         y_to = int(y.group("to") or "-1")

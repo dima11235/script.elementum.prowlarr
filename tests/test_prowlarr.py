@@ -33,7 +33,7 @@ class _Addon:
     def getAddonInfo(self, key):
         return {'id': 'script.elementum.prowlarr', 'name': 'Elementum Prowlarr',
                 'path': str(ROOT), 'icon': '', 'profile': str(ROOT),
-                'version': '0.4.0'}[key]
+                'version': '0.4.1'}[key]
 
     def getSetting(self, key):
         return SETTINGS[key]
@@ -155,6 +155,18 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(1, len(kept))
         self.assertIn('S1E1-2', kept[0]['name'])
 
+    def test_explicit_episode_survives_without_release_year(self):
+        items = [
+            torrent('Death_Comes_To_Pemberley.1x01.HDTV_x264-FoV'),
+            torrent('Death.Comes.to.Pemberley.S01E01.1080p.HDTV'),
+            torrent('Death Comes to Pemberley S1E1-2 HDTV'),
+            torrent('Death Comes to Pemberley S01E02 HDTV'),
+            torrent('Death Comes to Pemberley S02E01 HDTV'),
+            torrent('Death Comes to Pemberley S01 HDTV'),
+            torrent('Death Comes to Pemberley S01E01 2025 HDTV'),
+        ]
+        self.assertEqual(items[:3], filter.tv_season_episode(items, 1, '', 1, 1, 2013, 2013, 2013))
+
     def test_size_filter_applies_gib_limits_and_includes_unknown(self):
         items = [torrent('Kept'), torrent('Unknown'), torrent('Too big')]
         items[1]['_size_bytes'] = -1
@@ -211,6 +223,24 @@ class ClientTests(unittest.TestCase):
         asyncio.run(cli.search_by_indexer(indexer, client.SearchType.TV, 'Show', None, 1, 2))
         self.assertEqual({'t': 'tvsearch', 'q': 'Show S01E02'}, captured['params'])
 
+    def test_two_titles_preserve_movie_and_regular_tv_parameters(self):
+        cli = client.ProwlarrClient('http://prowlarr.example/', 'synthetic')
+        cli.indexers = [self.indexer(['q', 'season', 'ep'])]
+        seen = []
+
+        async def fake_send(url, params=None, json_response=False):
+            seen.append(params)
+            return ElementTree.fromstring('<rss><channel/></rss>')
+
+        cli.send_request = fake_send
+        titles = ('English', 'Русское')
+        asyncio.run(cli.search_movie(titles, 2013))
+        self.assertCountEqual([{'t': 'movie', 'q': f'{title} 2013'} for title in titles], seen)
+        seen.clear()
+        asyncio.run(cli.search_tv(titles, season=1, ep=2))
+        self.assertCountEqual([{'t': 'tvsearch', 'q': title, 'season': 1, 'ep': 2}
+                               for title in titles], seen)
+
     def test_year_goes_into_params_only_with_year_cap(self):
         captured = {}
 
@@ -239,6 +269,22 @@ class ProviderTests(unittest.TestCase):
         ), patch.object(sys, 'argv', ['main.py', 'synthetic-payload']), patch.dict(sys.modules):
             runpy.run_path(str(SRC / 'main.py'), run_name='__main__')
         self.assertEqual(4, len(register.call_args.args))
+
+    def test_parse_movie_and_episode_use_available_russian_and_english(self):
+        with patch.dict(SETTINGS, {'elementum.prowlarr.kodi_language': True}), patch.object(
+            prowlarr.xbmc, 'getLanguage', return_value='ru'
+        ):
+            for method in ('movie', 'episode', 'season'):
+                parsed = prowlarr.parse_payload(method, {
+                    'title': 'English', 'titles': {'EN': 'English', 'RU': 'Русское'},
+                })
+                self.assertEqual(('Русское', 'English'), parsed['search_titles'])
+            parsed = prowlarr.parse_payload('movie', {'title': 'English', 'titles': {'en': 'english '}})
+            self.assertEqual(('English',), parsed['search_titles'])
+
+    def test_russian_original_is_retained_with_english_translation(self):
+        parsed = prowlarr.parse_payload('movie', {'title': 'Русское', 'titles': {'en': 'English'}})
+        self.assertEqual(('English', 'Русское'), parsed['search_titles'])
 
     def test_empty_key_returns_empty_results_and_can_open_settings(self):
         with patch.dict(SETTINGS, api_key=''):
@@ -298,6 +344,40 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             ('/base/1/download', key, None),
             ('/base/synthetic.torrent', None, None),
         ], requests[3:])
+
+    async def test_episode_search_sends_both_titles_and_keeps_exact_yearless_match(self):
+        calls = []
+
+        async def respond(request):
+            if request.path == '/api/v1/indexer':
+                return web.json_response([{'id': 1, 'name': 'Tracker', 'enable': True, 'protocol': 'torrent'}])
+            if request.path == '/api/v1/indexerstatus':
+                return web.json_response([])
+            title = request.query['q']
+            calls.append(title)
+            if title.startswith('English'):
+                return web.Response(status=429)
+            return web.Response(text=(
+                '<rss><channel><item><title>Русское.S01E01.1080p</title>'
+                '<link>magnet:?xt=urn:btih:' + 'c' * 40 + '</link></item></channel></rss>'
+            ))
+
+        app = web.Application()
+        app.router.add_get('/{path:.*}', respond)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        address, port = runner.addresses[0]
+        payload = prowlarr.parse_payload('episode', {
+            'title': 'English', 'titles': {'ru': 'Русское', 'en': 'English'},
+            'season': 1, 'episode': 1, 'year': 2013, 'season_year': 2013, 'show_year': 2013,
+        })
+        with patch.dict(SETTINGS, host=f'http://{address}:{port}'):
+            results = await prowlarr.search_prowlarr(prowlarr.PDialog('Search'), payload, 'episode')
+        self.assertCountEqual(['English', 'English 2013', 'Русское', 'Русское 2013'], calls)
+        self.assertEqual(['Русское.S01E01.1080p'], [item['name'] for item in results])
 
     def test_download_key_stays_on_prowlarr_origin(self):
         cli = client.ProwlarrClient('https://prowlarr.example/base/', 'synthetic')
