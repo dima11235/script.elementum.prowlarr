@@ -470,7 +470,7 @@ class Client:
                 progress(completed, 'indexer_results', name, len(releases[result]))
             waiting = [pending[future] for future in pending
                        if future not in releases and future not in errors]
-            progress(completed, 'requests', f'{completed}/{len(pending)}', ', '.join(waiting))
+            progress(completed, 'requests', completed, len(pending), ', '.join(waiting))
         if len(errors) == len(pending):
             raise errors[next(iter(pending))]
         # Preserve indexer order for releases with identical sort keys.

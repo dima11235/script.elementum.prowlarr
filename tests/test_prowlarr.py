@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 from threading import Event
@@ -119,8 +120,8 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual([
             (5, 'indexers', 'Slow, Fast'),
             (42, 'indexer_results', 'Fast', 1),
-            (42, 'requests', '1/2', 'Slow'),
-            (80, 'requests', '2/2', ''),
+            (42, 'requests', 1, 2, 'Slow'),
+            (80, 'requests', 2, 2, ''),
             (82, 'filtering'),
             (95, 'links', 0, 0),
             (95, 'links_done', 0, 0),
@@ -202,6 +203,46 @@ class ProwlarrTests(unittest.TestCase):
             gui.Dialog.return_value.notification.assert_not_called()
         self.assertEqual(3, gui.DialogProgressBG.return_value.close.call_count)
         gui.Dialog.return_value.notification.assert_not_called()
+
+    def test_packaged_progress_strings_do_not_discard_results(self):
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+        feed = ElementTree.fromstring(
+            '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>'
+            f'<item><title>Movie 1080p WEB-DL</title><link>{magnet}</link>'
+            '<torznab:attr name="seeders" value="5"/></item></channel></rss>'
+        )
+        for locale in ('ru_ru', 'en_gb'):
+            with self.subTest(locale=locale):
+                path = ROOT / 'resources/language' / f'resource.language.{locale}' / 'strings.po'
+                strings = {
+                    int(identifier): json.loads(message)
+                    for identifier, message in re.findall(
+                        r'^msgctxt "#(\d+)"\nmsgid "[^\n]*"\nmsgstr ("[^\n]*")',
+                        path.read_text(encoding='utf-8'), re.MULTILINE,
+                    )
+                }
+                settings = Mock()
+                settings.getSettingInt.side_effect = {'max_results': 10, 'min_seeders': 1, 'sort_by': 1}.get
+                settings.getSettingBool.return_value = True
+                settings.getSetting.return_value = ''
+                settings.getLocalizedString.side_effect = strings.__getitem__
+                addon_api = Mock()
+                addon_api.Addon.return_value = settings
+                gui = Mock()
+                xbmc = Mock()
+                xbmc.getLanguage.return_value = locale[:2]
+                modules = {'xbmc': xbmc, 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}
+                with patch.dict(sys.modules, modules), patch.object(sys, 'path', sys.path[:]):
+                    addon = load('addon_tested_localized_progress', ROOT / 'addon.py')
+                client, _ = self.client(feed)
+                with patch.object(addon, 'client', return_value=client):
+                    results = addon.search('Movie')
+                self.assertEqual([magnet], [item['uri'] for item in results])
+                messages = [call_.kwargs['message'] for call_ in gui.DialogProgressBG.return_value.update.call_args_list]
+                self.assertIn(strings[32074].format(1, 1, ''), messages)
+                strings[32074] = '{missing}'
+                with patch.object(addon, 'client', return_value=client):
+                    self.assertEqual([magnet], [item['uri'] for item in addon.search('Movie')])
 
     def test_all_paused_indexers_keep_window_with_explanation(self):
         gui = Mock()

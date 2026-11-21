@@ -66,7 +66,12 @@ def search(payload, kind='search'):
         heading = f'{ADDON_NAME} | {localize(32078).format(pause)}' if pause else ADDON_NAME
 
         def update(percent, event, *args):
-            progress.update(percent, heading=heading, message=localize(PROGRESS_MESSAGES[event]).format(*args))
+            try:
+                message = localize(PROGRESS_MESSAGES[event]).format(*args)
+            except (IndexError, KeyError, ValueError):
+                xbmc.log(f'Elementum Prowlarr: invalid progress message for {event}', xbmc.LOGWARNING)
+                return
+            progress.update(percent, heading=heading, message=message)
 
         allow_season_pack = ADDON.getSettingBool('season_fallback')
         results = prowlarr.search_media(
