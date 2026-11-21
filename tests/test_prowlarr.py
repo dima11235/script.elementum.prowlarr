@@ -33,10 +33,10 @@ class _Addon:
     def getAddonInfo(self, key):
         return {'id': 'script.elementum.prowlarr', 'name': 'Elementum Prowlarr',
                 'path': str(ROOT), 'icon': '', 'profile': str(ROOT),
-                'version': '0.4.3'}[key]
+                'version': '0.4.4'}[key]
 
     def getSetting(self, key):
-        return SETTINGS[key]
+        return SETTINGS.get(key, '')
 
     def getLocalizedString(self, value):
         return f'string {value}'
@@ -241,6 +241,22 @@ class ClientTests(unittest.TestCase):
         self.assertCountEqual([{'t': 'tvsearch', 'q': title, 'season': 1, 'ep': 2}
                                for title in titles], seen)
 
+    def test_smart_search_skips_years_when_primary_titles_find_enough(self):
+        cli = client.ProwlarrClient('http://prowlarr.example/', 'synthetic')
+        cli.indexers = [self.indexer(['q'])]
+        seen = []
+
+        async def fake_send(url, params=None, json_response=False):
+            seen.append(params['q'])
+            items = ''.join(f'<item><title>{params["q"]} {i}</title>'
+                            f'<link>magnet:?xt=urn:btih:{i:040x}</link></item>' for i in range(3))
+            return ElementTree.fromstring(f'<rss><channel>{items}</channel></rss>')
+
+        cli.send_request = fake_send
+        rows = asyncio.run(cli.search_tv_smart(('English', 'Русское'), 2013, 2013, 2013))
+        self.assertEqual(['English', 'Русское'], seen)
+        self.assertEqual(6, len(rows))
+
     def test_year_goes_into_params_only_with_year_cap(self):
         captured = {}
 
@@ -322,6 +338,7 @@ class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
             self.item('Смерть приходит в Пемберли HDTV', 'c', 15),
             self.item('Death Comes to Pemberley another pack', 'd', 10),
             self.item('Vikings.S01E01.1080p', 'e', 200),
+            self.item('Death Comes to Pemberley 2013 S01E02', '1', 200),
             self.item('Death Comes to Pemberley with no seeds', 'f', 0),
         ]
         results = await self.search(items)
@@ -346,7 +363,9 @@ class EpisodeFallbackTests(unittest.IsolatedAsyncioTestCase):
         broken = torrent('Death Comes to Pemberley S01E01', uri='magnet:?xt=invalid')
         backup = self.item('Death Comes to Pemberley season pack', 'b', 8)
         extra = self.item('Смерть приходит в Пемберли HDTV', 'c')
-        self.assertEqual([backup], await self.search([broken, backup, extra], max_results=1))
+        results = await self.search([broken, backup, extra], max_results=1)
+        self.assertEqual([backup['name']], [row['name'] for row in results])
+        self.assertEqual('Tracker (string 32755)', results[0]['provider'])
 
     async def test_enough_exact_matches_needs_no_fallback(self):
         exact = [self.item(f'Death Comes to Pemberley S01E01 choice {k}', k) for k in 'abc']
@@ -408,18 +427,98 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             ('/base/synthetic.torrent', None, None),
         ], requests[3:])
 
+    async def test_search_deadline_retains_successful_indexer(self):
+        async def respond(request):
+            if request.path.endswith('/2/newznab'):
+                await asyncio.sleep(.35)
+            return web.Response(text=(
+                '<rss><channel><item><title>Release</title>'
+                '<link>magnet:?xt=urn:btih:' + 'c' * 40 + '</link></item></channel></rss>'
+            ))
+
+        app = web.Application()
+        app.router.add_get('/{path:.*}', respond)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        host, port = runner.addresses[0]
+        cli = client.ProwlarrClient(f'http://{host}:{port}', 'synthetic')
+        cli.indexers = [client.Indexer({'id': i, 'name': name}) for i, name in [(1, 'Fast'), (2, 'Slow')]]
+        cli.deadline = prowlarr.time.monotonic() + .15
+        await cli.create_session()
+        try:
+            results = await cli.search_query('Release')
+        finally:
+            await cli.close_session()
+        self.assertEqual(1, len(results))
+        self.assertIn('Fast', results[0]['provider'])
+
+    async def test_download_budget_keeps_other_tracker_and_skips_paused_provider(self):
+        calls = []
+        magnet = 'magnet:?xt=urn:btih:' + 'c' * 40
+
+        async def respond(request):
+            calls.append(request.path)
+            if request.path == '/limited':
+                return web.Response(status=429, headers={'Retry-After': '30'})
+            if request.path == '/slow':
+                await asyncio.sleep(.2)
+            return web.Response(status=302, headers={'Location': magnet})
+
+        app = web.Application()
+        app.router.add_get('/{path:.*}', respond)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        host, port = runner.addresses[0]
+        rows = [
+            torrent('Same title', provider='Limited', uri=f'http://{host}:{port}/limited'),
+            torrent('Skipped', provider='Limited', uri=f'http://{host}:{port}/skipped'),
+            torrent('Same title', provider='Good', uri=f'http://{host}:{port}/good'),
+            torrent('Slow', provider='Slow', uri=f'http://{host}:{port}/slow'),
+        ]
+        results = await prowlarr.torrent.uri_to_magnets_uniq_torrents(
+            rows, deadline=prowlarr.time.monotonic() + .1,
+        )
+        self.assertCountEqual(['/limited', '/good', '/slow'], calls)
+        self.assertEqual(['Good'], [row['provider'] for row in results])
+
+    async def test_magnet_limit_stops_before_network_downloads(self):
+        exact = torrent('First')
+        extra = torrent('Second', uri='http://127.0.0.1:1/not-needed')
+        with patch.object(prowlarr.torrent, 'get_magnet', wraps=prowlarr.torrent.get_magnet) as resolve:
+            results = await prowlarr.torrent.uri_to_magnets_uniq_torrents([exact, extra], limit=1)
+        self.assertEqual([exact], results)
+        self.assertEqual(1, resolve.await_count)
+
     async def test_episode_search_sends_both_titles_and_keeps_exact_yearless_match(self):
         calls = []
+        active = set()
+        overlap = []
 
         async def respond(request):
             if request.path == '/api/v1/indexer':
-                return web.json_response([{'id': 1, 'name': 'Tracker', 'enable': True, 'protocol': 'torrent'}])
+                return web.json_response([
+                    {'id': i, 'name': f'Tracker {i}', 'enable': True, 'protocol': 'torrent'} for i in (1, 2)
+                ])
             if request.path == '/api/v1/indexerstatus':
                 return web.json_response([])
             title = request.query['q']
-            calls.append(title)
+            indexer = int(request.path.split('/')[4])
+            calls.append((indexer, title))
+            self.assertNotIn(indexer, active)
+            active.add(indexer)
+            overlap.append(len(active))
+            await asyncio.sleep(.02)
+            active.remove(indexer)
+            if indexer == 1:
+                return web.Response(status=429, headers={'Retry-After': '30'})
             if title.startswith('English'):
-                return web.Response(status=429)
+                return web.Response(text='<rss><channel/></rss>')
             return web.Response(text=(
                 '<rss><channel><item><title>Русское.S01E01.1080p</title>'
                 '<link>magnet:?xt=urn:btih:' + 'c' * 40 + '</link></item></channel></rss>'
@@ -439,7 +538,9 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         })
         with patch.dict(SETTINGS, host=f'http://{address}:{port}'):
             results = await prowlarr.search_prowlarr(prowlarr.PDialog('Search'), payload, 'episode')
-        self.assertCountEqual(['English', 'English 2013', 'Русское', 'Русское 2013'], calls)
+        self.assertEqual(['English'], [q for i, q in calls if i == 1])
+        self.assertEqual(['English', 'Русское', 'English 2013', 'Русское 2013'], [q for i, q in calls if i == 2])
+        self.assertIn(2, overlap)
         self.assertEqual(['Русское.S01E01.1080p'], [item['name'] for item in results])
 
     def test_download_key_stays_on_prowlarr_origin(self):
@@ -451,6 +552,12 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ParseTests(unittest.TestCase):
+    def test_feed_keeps_alternative_links_with_the_same_title(self):
+        links = ['magnet:?xt=urn:btih:' + key * 40 for key in 'ab']
+        content = ''.join(f'<item><title>Same name</title><link>{uri}</link></item>' for uri in links)
+        rows = client.parse_torrents(ElementTree.fromstring(f'<rss><channel>{content}</channel></rss>'))
+        self.assertEqual(links, [row['uri'] for row in rows])
+
     def test_parse_item_maps_torznab_attributes(self):
         magnet = 'magnet:?xt=urn:btih:' + 'b' * 40
         xml = f'''<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item>
@@ -472,6 +579,12 @@ class ParseTests(unittest.TestCase):
 
 
 class UtilsTests(unittest.TestCase):
+    def test_size_sort_uses_bytes(self):
+        items = [dict(torrent('Small'), size='900 MB', _size_bytes=900_000_000),
+                 dict(torrent('Large'), size='10 GB', _size_bytes=10_000_000_000)]
+        with patch.dict(SETTINGS, {'elementum.prowlarr.sort_by': 2}):
+            self.assertEqual(items[::-1], prowlarr.sort_results(items))
+
     def test_resolution_detection(self):
         self.assertEqual('1080p', utils.get_resolution('Show.S01E02.1080p.WEB-DL'))
         self.assertEqual('4k', utils.get_resolution('Movie 2160p BluRay'))

@@ -229,13 +229,6 @@ def check_season_name(title, season_name=""):
     return season_name
 
 
-def concat_dicts(dicts):
-    d4 = {}
-    for d in dicts:
-        d4.update(d)
-    return d4
-
-
 def is_english(s):
     try:
         s.encode(encoding='utf-8').decode('ascii')

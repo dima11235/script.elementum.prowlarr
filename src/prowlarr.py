@@ -26,7 +26,7 @@ available_providers = 0
 special_chars = "()\"':.[]<>/\\?"
 
 
-async def get_client():
+async def get_client(deadline=None):
     host = urlparse(get_setting('host').strip())
     if host.scheme not in ('http', 'https') or not host.hostname or host.username or host.query or host.fragment:
         log.warning('Invalid Prowlarr URL')
@@ -39,6 +39,7 @@ async def get_client():
         utils.notify(utils.translation(32601), image=utils.get_icon_path())
         return None
     cli = ProwlarrClient(host=host.geturl(), api_key=api_key)
+    cli.deadline = deadline
     await cli.create_session()
     try:
         await cli.request_indexers()
@@ -196,7 +197,7 @@ def sort_results(results):
     elif sort_by == 1:
         sorted_results = sorted(results, key=lambda r: r['seeds'], reverse=True)
     elif sort_by == 2:
-        sorted_results = sorted(results, key=lambda r: r['size'], reverse=True)
+        sorted_results = sorted(results, key=lambda r: r["_size_bytes"], reverse=True)
     else:
         # todo do something more advanced with the "balanced" option
         sorted_results = sorted(results, key=lambda r: r["seeds"] * 3 * r["resolution"], reverse=True)
@@ -206,7 +207,15 @@ def sort_results(results):
 
 async def search_prowlarr(p_dialog, payload, method):
     p_dialog.update(0, message="Getting indexers list")
-    j_cli = await get_client()
+    elementum = addon.xbmcaddon.Addon('plugin.video.elementum')
+    timeout = 40
+    if elementum.getSetting('custom_provider_timeout_enabled') == 'true':
+        configured = elementum.getSetting('custom_provider_timeout')
+        if configured.isdecimal() and int(configured) > 0:
+            timeout = int(configured)
+    budget = max(0.5, timeout - 5)
+    deadline = time.monotonic() + budget
+    j_cli = await get_client(deadline - min(10, budget / 3))
     if j_cli is None:
         return []
     try:
@@ -247,19 +256,27 @@ async def search_prowlarr(p_dialog, payload, method):
 
     log.info(f"{len(exact)} ... resolving unique magnets")
     progress = p_dialog.callback(100)
-    max_results = get_setting('max_results', int)
-    results = await torrent.uri_to_magnets_uniq_torrents(exact, progress)
+    max_results = max(0, get_setting('max_results', int))
+    paused_downloads = set()
+    results = await torrent.uri_to_magnets_uniq_torrents(
+        sort_results(exact), progress, limit=max_results, deadline=deadline, paused=paused_downloads)
     p_dialog.update(message=utils.translation(32753))
-    results = sort_results(results)
     missing = min(max_results, MIN_EPISODE_RESULTS) - len(results)
     if smart_episode and missing > 0:
         exact_ids = {id(result) for result in exact}
-        fallback = [result for result in candidates if id(result) not in exact_ids]
+        fallback = []
+        for result in candidates:
+            if id(result) in exact_ids:
+                continue
+            markers = filter.explicit_episode_markers(result['name'])
+            if not markers or filter.matches_episode(markers, payload.get('season'), payload.get('episode')):
+                fallback.append(result)
         seen = {torrent.get_info_hash(result['uri']) for result in results}
-        extras = await torrent.uri_to_magnets_uniq_torrents(fallback, progress, seen=seen)
-        for extra in sort_results(extras)[:missing]:
+        extras = await torrent.uri_to_magnets_uniq_torrents(
+            sort_results(fallback), progress, seen=seen, limit=missing, deadline=deadline, paused=paused_downloads)
+        for extra in extras:
             extra['provider'] += f" ({utils.translation(32755)})"
             results.append(extra)
 
-    p_dialog.update(message=utils.translation(32754))
+    p_dialog.update(message=utils.translation(32756))
     return results[:max_results]

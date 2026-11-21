@@ -75,6 +75,14 @@ class Indexer:
         return t, cap
 
 
+class IndexerResponseError(Exception):
+    pass
+
+
+class IndexerRateLimited(Exception):
+    pass
+
+
 class ProwlarrClient:
     #  get list of configured indexers
     get_indexers_list = "api/v1/indexer"
@@ -85,6 +93,7 @@ class ProwlarrClient:
         self.api_key = api_key
         self.indexers = []
         self.session = None
+        self.deadline = None
 
     async def create_session(self, host=None):
         if host:
@@ -100,14 +109,20 @@ class ProwlarrClient:
     async def send_request(self, url, params=None, json_response=False):
         params = dict(params or {})
         start = time.monotonic()
-        async with self.session.get(urljoin(self.host, url), params=params,
+        remaining = self.deadline - start if self.deadline is not None else 60
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        timeout = aiohttp.ClientTimeout(total=min(60, remaining))
+        async with self.session.get(urljoin(self.host, url), params=params, timeout=timeout,
                                     headers={'X-Api-Key': self.api_key},
                                     allow_redirects=False) as resp:
             log.debug(f"Indexers request status: {resp.status}")
             if resp.status != HTTPStatus.OK:
                 if resp.status == HTTPStatus.TOO_MANY_REQUESTS and not json_response:
-                    log.warning('Prowlarr indexer is temporarily unavailable (HTTP 429); skipping')
-                    return None
+                    retry_after = resp.headers.get('Retry-After', '')
+                    raise IndexerRateLimited(int(retry_after) if retry_after.isdecimal() else None)
+                if not json_response:
+                    raise IndexerResponseError(resp.status)
                 self.proceed_resp_error(resp.status, f"Prowlarr HTTP {resp.status}")
                 return
             response_time = time.monotonic() - start
@@ -118,6 +133,8 @@ class ProwlarrClient:
         try:
             root = json.loads(body) if json_response else ElT.fromstring(body)
         except (ValueError, ElT.ParseError):
+            if not json_response:
+                raise IndexerResponseError(502)
             self.proceed_resp_error(502, "Invalid response from Prowlarr")
             return None
         if json_response:
@@ -126,8 +143,8 @@ class ProwlarrClient:
                 return None
             return root
         if root.tag == "error":
-            self.proceed_resp_error(root.get('code', 'error'), "Prowlarr indexer error")
-            return
+            code = root.get("code", "")
+            raise IndexerResponseError(int(code) if code.isdecimal() else "invalid response")
         set_setting('settings_validated', 'Success')
         return root
 
@@ -204,21 +221,30 @@ class ProwlarrClient:
         url = self.query_by_indexer.format(indexer=indexer.id)
         try:
             root = await self.send_request(url, params)
+        except IndexerResponseError as error:
+            log.warning(f"Prowlarr search for {indexer.name}: status={error.args[0]}")
+            return [], indexer
         except asyncio.TimeoutError:
-            log.warning(f"Prowlarr indexer {indexer.id} timed out")
-            return {}, indexer
+            log.warning(f"Prowlarr search for {indexer.name}: timed out")
+            return [], indexer
         except aiohttp.ClientError:
-            log.error(f"Prowlarr indexer {indexer.id} connection failed")
-            return {}, indexer
+            log.error(f"Prowlarr search for {indexer.name}: connection failed")
+            return [], indexer
 
         if root is None:
-            return {}, indexer
+            return [], indexer
         torr_list = parse_torrents(root)
-        for torrent in torr_list.values():
+        valid = []
+        for torrent in torr_list:
+            try:
+                torrent['uri'] = self.download_uri(torrent['uri'])
+            except ValueError:
+                log.warning(f'Prowlarr search for {indexer.name}: invalid download URL')
+                continue
             torrent['provider'] = f'[COLOR {utils.get_provider_color(indexer.name)}]{indexer.name}[/COLOR]'
-            torrent['uri'] = self.download_uri(torrent['uri'])
-        log.info(f"Done searching. Got {len(torr_list)} torrents from {indexer.name}.")
-        return torr_list, indexer
+            valid.append(torrent)
+        log.info(f"Done searching. Got {len(valid)} torrents from {indexer.name}.")
+        return valid, indexer
 
     def download_uri(self, uri):
         """Authenticate only same-origin Prowlarr proxy links, never tracker URLs."""
@@ -239,64 +265,64 @@ class ProwlarrClient:
         query.append(('apikey', self.api_key))
         return urlunsplit((target.scheme, target.netloc, target.path, urlencode(query), target.fragment))
 
-    async def await_indexers(self, tasks, pd_cb):
-        def update_p_dialog():
-            if pd_cb:
-                pd_cb(count, total, utils.translation(32754).format(PDialog.default_heading, count, total),
-                      utils.translation(32752).format(', '.join(set(await_ind_names))))
+    async def search_indexer(self, indexer, kind, queries, fallback):
+        results = []
+        for group in (queries, fallback):
+            for query in group:
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    return results, indexer
+                try:
+                    rows, _ = await self.search_by_indexer(indexer, kind, *query)
+                except IndexerRateLimited as error:
+                    retry_after = error.args[0]
+                    log.warning(f"Prowlarr search for {indexer.name}: HTTP 429, Retry-After={retry_after}")
+                    return results, indexer
+                results.extend(rows)
+            if len({item['name'] for item in results}) >= 3:
+                break
+        return results, indexer
 
-        result = []
-        total = len(tasks)
-        if not tasks or not self.indexers:
-            return result
-        count = 0
-        await_ind_names = [i.name for i in self.indexers] * (
-                    total // len(self.indexers))  # multipy in case multiple searches
-        update_p_dialog()
-        for task in asyncio.as_completed(tasks):
-            torrents, indexer = await task
-            count += 1
-            await_ind_names.remove(indexer.name)
-            update_p_dialog()
-            result.append(torrents)
-        return result
+    async def search_indexers(self, kind, queries, p_dialog_cb, fallback=()):
+        tasks = [self.search_indexer(indexer, kind, queries, fallback) for indexer in self.indexers]
+        pending = [indexer.name for indexer in self.indexers]
+
+        def update():
+            if p_dialog_cb:
+                count = len(tasks) - len(pending)
+                p_dialog_cb(count, len(tasks), utils.translation(32754).format(PDialog.default_heading, count, len(tasks)),
+                            utils.translation(32752).format(', '.join(pending)))
+
+        results = []
+        if tasks:
+            update()
+            for task in asyncio.as_completed(tasks):
+                rows, indexer = await task
+                pending.remove(indexer.name)
+                results.extend(rows)
+                update()
+        return results
 
     async def search_movie(self, titles, year=None, imdb_id=None, p_dialog_cb=None):
         titles = (titles,) if isinstance(titles, str) else titles
-        tasks = [self.search_by_indexer(ind, SearchType.MOVIE, title, year, imdb_id=imdb_id)
-                 for ind in self.indexers for title in titles]
-        torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
-        return utils.concat_dicts(torrent_dicts).values()
+        queries = [(title, year, None, None, imdb_id) for title in titles]
+        return await self.search_indexers(SearchType.MOVIE, queries, p_dialog_cb)
 
     async def search_tv(self, titles, year=None, season=None, ep=None, imdb_id=None, p_dialog_cb=None):
         titles = (titles,) if isinstance(titles, str) else titles
-        tasks = [self.search_by_indexer(ind, SearchType.TV, title, year, season, ep, imdb_id)
-                 for ind in self.indexers for title in titles]
-        if get_setting("search_season_on_episode", bool) and bool(season) and bool(ep):
-            tasks += [self.search_by_indexer(ind, SearchType.TV, title, year, season, imdb_id=imdb_id)
-                      for ind in self.indexers for title in titles]
-        torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
-        return utils.concat_dicts(torrent_dicts).values()
+        queries = [(title, year, season, ep, imdb_id) for title in titles]
+        if get_setting("search_season_on_episode", bool) and season and ep:
+            queries.extend((title, year, season, None, imdb_id) for title in titles)
+        return await self.search_indexers(SearchType.TV, queries, p_dialog_cb)
 
     async def search_query(self, title, year=None, imdb_id=None, p_dialog_cb=None):
-        tasks = [self.search_by_indexer(ind, SearchType.COMMON, title, year, imdb_id=imdb_id) for ind in self.indexers]
-        torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
-        return utils.concat_dicts(torrent_dicts).values()
+        return await self.search_indexers(SearchType.COMMON, [(title, year, None, None, imdb_id)], p_dialog_cb)
 
     async def search_tv_smart(self, titles, ep_year=None, season_year=None, show_year=None, p_dialog_cb=None):
         titles = (titles,) if isinstance(titles, str) else titles
-        years = [None]
-        if ep_year and ep_year != season_year:
-            years.append(ep_year)
-        if season_year and season_year != show_year:
-            years.append(season_year)
-        if show_year:
-            years.append(show_year)
-        years = tuple(dict.fromkeys(years))
-        tasks = [self.search_by_indexer(ind, SearchType.TV, title, year)
-                 for ind in self.indexers for title in titles for year in years]
-        torrent_dicts = await self.await_indexers(tasks, p_dialog_cb)
-        return utils.concat_dicts(torrent_dicts).values()
+        years = dict.fromkeys(year for year in (ep_year, season_year, show_year) if year)
+        queries = [(title, None) for title in titles]
+        fallback = [(title, year) for year in years for title in titles]
+        return await self.search_indexers(SearchType.TV, queries, p_dialog_cb, fallback)
 
     @staticmethod
     def proceed_resp_error(code, description):
@@ -307,7 +333,7 @@ class ProwlarrClient:
 
 
 def parse_torrents(root):
-    results = {}
+    results = []
     items = root.findall("channel/item")
     for item in items:
         try:
@@ -316,7 +342,7 @@ def parse_torrents(root):
             log.warning("Ignoring malformed Prowlarr torrent item")
             continue
         if result is not None:
-            results[result['name']] = result
+            results.append(result)
     return results
 
 

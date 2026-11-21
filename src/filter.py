@@ -135,6 +135,15 @@ EXPLICIT_EPISODE = re.compile(
 )
 
 
+def explicit_episode_markers(name):
+    return [(int(s or x), int(first), int(last or first))
+            for s, x, first, last in EXPLICIT_EPISODE.findall(name.lower())]
+
+
+def matches_episode(markers, season, episode):
+    return episode is not None and any(s == season and first <= episode <= last for s, first, last in markers)
+
+
 def tv_season_episode(results, season, season_name, episode, global_ep, ep_year, season_year=0, start_year=0):
     # Function for sorting large amount of not accurate torrents. Checks year season and episodes.
     # The filtering shouldn't be strict. I'm trying not to lose suitable torrents.
@@ -145,6 +154,10 @@ def tv_season_episode(results, season, season_name, episode, global_ep, ep_year,
         name = re.sub(r"\d+p", '', name)
         log.debug(f"torrent: {name}")
 
+        markers = explicit_episode_markers(name)
+        if episode is not None and markers and not matches_episode(markers, season, episode):
+            continue
+
         if season_name and season_name in name:
             filtered.append(res)
             continue
@@ -152,11 +165,8 @@ def tv_season_episode(results, season, season_name, episode, global_ep, ep_year,
         year_pattern = r"(?P<from>(?:19|20)\d{2})(?:\s*-\s*(?P<to>[12]\d{3}))?"
         y = re.search(year_pattern, name)
         if not y:
-            for s_marker, x_marker, first, last in EXPLICIT_EPISODE.findall(name):
-                if (episode is not None and int(s_marker or x_marker) == season
-                        and int(first) <= episode <= int(last or first)):
-                    filtered.append(res)
-                    break
+            if matches_episode(markers, season, episode):
+                filtered.append(res)
             continue
         y_from = int(y.group("from") or "99999")
         y_to = int(y.group("to") or "-1")
@@ -167,7 +177,7 @@ def tv_season_episode(results, season, season_name, episode, global_ep, ep_year,
         # Remove the year from the text
         name_no_year = re.sub(year_pattern, '', name)
 
-        if f"s{season}e{episode}" in name_no_year:
+        if matches_episode(markers, season, episode):
             filtered.append(res)
             continue
 
