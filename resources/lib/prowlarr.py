@@ -3,12 +3,12 @@ import json
 import re
 import socket
 from base64 import b32decode
-from hashlib import sha1
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from http.client import HTTPException
 from time import monotonic
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xml.etree import ElementTree
 
@@ -46,14 +46,7 @@ RELEASE_CATEGORIES = (
     ('tvrip', r'\b(hdtvrip|tvrip|iptv|satrip)\b'),
 )
 
-# The alternative title is skipped on indexers whose localized-title search
-# already returned at least this many releases: those indexers clearly index
-# the localized name and the second request would only duplicate the load.
-ADAPTIVE_TITLE_THRESHOLD = 5
-# One proxy link must not consume the whole resolve budget: a hanging tracker
-# response would otherwise drop every result found on the other indexers.
-RESOLVE_LINK_CAP = 10
-RESOLVE_TORRENT_MAX_BYTES = 4 * 1024 * 1024
+RESOLVE_BUDGET = 10
 
 
 def release_category(title):
@@ -72,91 +65,28 @@ def human_size(size):
         value /= 1024
 
 
-def _bdecode(data, position, spans):
-    char = data[position:position + 1]
-    if char == b'i':
-        end = data.find(b'e', position)
-        if end < 0:
-            raise ValueError('unterminated integer')
-        return int(data[position + 1:end]), position, end + 1
-    if char == b'l':
-        result = []
-        start = position
-        position += 1
-        while data[position:position + 1] != b'e':
-            value, _, position = _bdecode(data, position, spans)
-            result.append(value)
-        return result, start, position + 1
-    if char == b'd':
-        result = {}
-        start = position
-        position += 1
-        while data[position:position + 1] != b'e':
-            key, _, key_end = _bdecode(data, position, spans)
-            if not isinstance(key, bytes):
-                raise ValueError('dictionary keys must be byte strings')
-            value, value_start, value_end = _bdecode(data, key_end, spans)
-            result[key] = value
-            if key == b'info':
-                spans.append((value_start, value_end))
-            position = value_end
-        return result, start, position + 1
-    length_end = data.find(b':', position)
-    if length_end < 0:
-        raise ValueError('unterminated string length')
-    length = int(data[position:length_end])
-    start = length_end + 1
-    end = start + length
-    if length < 0 or end > len(data):
-        raise ValueError('string length out of bounds')
-    return data[start:end], start, end
-
-
-def torrent_info_hash(content):
-    """Return the bittorrent info hash of a .torrent file, or None."""
-    spans = []
-    try:
-        _bdecode(content, 0, spans)
-    except (ValueError, IndexError):
-        return None
-    if not spans:
-        return None
-    start, end = spans[0]
-    return sha1(content[start:end]).hexdigest()
-
-
 def search_titles(payload, language='', kind='search'):
-    """Search titles in priority order: localized first, then the alternative.
-
-    RuTracker and other local trackers index localized names while many
-    international trackers only know the English one, so both are searched
-    and the results are merged.
-    """
+    """Search each available Russian and English title once per indexer."""
     if isinstance(payload, str):
-        return [payload.strip()]
+        return [payload.strip()] if payload.strip() else []
     titles = {str(key).lower(): value for key, value in (payload.get('titles') or {}).items()}
     original = str(payload.get('title') or '').strip()
-    if original.isascii():
-        english = original or titles.get('en')
-    else:
-        english = titles.get('en') or original
-    query = str(payload.get('query') or '').strip()
-    localized = str(titles.get(language.lower()) or '').strip() if language else ''
-    preferred_original = original if original and not original.isascii() else ''
+    english = original if original and original.isascii() else titles.get('en') or original
+    localized = titles.get(language.lower()) if language else None
+    query = payload.get('query')
     if kind == 'search':
-        # A general search is the text the user typed: one query, Jackett parity.
-        for value in (query, localized, english, original, next(iter(titles.values()), '')):
-            value = str(value or '').strip()
-            if value:
-                return [value]
-        return []
-    ordered = [localized, preferred_original, english, original, query]
-    unique = []
-    for value in ordered:
-        value = str(value or '').strip()
-        if value and value.casefold() not in {seen.casefold() for seen in unique}:
-            unique.append(value)
-    return unique
+        options = (query, original, localized, english, *titles.values())
+        return next(([str(value).strip()] for value in options if value and str(value).strip()), [])
+    russian = titles.get('ru') or (original if re.search(r'[а-яё]', original, re.I) else localized)
+    english = titles.get('en') or english
+    options = (russian, english) if language.lower() == 'ru' else (english, russian)
+    selected = {}
+    for option in options:
+        value = str(option or '').strip()
+        if value:
+            selected.setdefault(value.casefold(), value)
+    fallback = str(original or query or next(iter(titles.values()), '') or '').strip()
+    return list(selected.values()) or ([fallback] if fallback else [])
 
 
 def title_from_payload(payload, language='', kind='search'):
@@ -212,9 +142,13 @@ EPISODE_MARKER = re.compile(
 COMPACT_EPISODE = re.compile(
     r'(?<!\w)(\d{1,3})x(\d{1,4})(?:[-–](\d{1,4}))?(?!\w)', re.IGNORECASE,
 )
+ABSOLUTE_EPISODES = re.compile(
+    r'(?<!\w)(?:e(\d{1,4})\s*[-–]\s*e?(\d{1,4})|(\d{1,4})\s+(?:из|of)\s+\d{1,4})(?!\w)',
+    re.IGNORECASE,
+)
 
 
-def matches_tv(title, season, episode, allow_pack, require_marker):
+def matches_tv(title, season, episode, allow_pack, require_marker, tv_metadata=None):
     has_marker = False
     for marker in COMPACT_EPISODE.finditer(title):
         has_marker = True
@@ -236,7 +170,18 @@ def matches_tv(title, season, episode, allow_pack, require_marker):
             if int(first) <= episode <= int(last or first):
                 return True
             entry = EPISODE_MARKER.match(title, entry.end())
-    return not has_marker and not require_marker
+    if has_marker or not require_marker:
+        return not has_marker
+    if tv_metadata is None:
+        return False
+    season_name, absolute, years = tv_metadata
+    if allow_pack and season_name and season_name in title.casefold():
+        return True
+    if episode is not None and absolute and years and re.search(r'(?<!\d)(?:' + '|'.join(years) + r')(?!\d)', title):
+        for first, last, count in ABSOLUTE_EPISODES.findall(title):
+            if int(first or 1) <= absolute <= int(last or count):
+                return True
+    return False
 
 
 def torrent_hash(value):
@@ -323,7 +268,7 @@ class Client:
         self._indexers = None
         self._cooldowns = []
 
-    def _request(self, endpoint, params=None):
+    def _request(self, endpoint, params=None, timeout=None):
         torznab = endpoint.endswith('/newznab')
         url = urljoin(self.base, endpoint)
         if params:
@@ -333,7 +278,7 @@ class Client:
         # Do not inherit environment proxies or forward authentication on redirects.
         opener = build_opener(ProxyHandler({}), NoRedirect())
         try:
-            with opener.open(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout if timeout is None else timeout) as response:
                 data = response.read(32 * 1024 * 1024 + 1)
                 if len(data) > 32 * 1024 * 1024:
                     raise ProwlarrError('Prowlarr response exceeds 32 MiB')
@@ -350,16 +295,21 @@ class Client:
             raise ProwlarrError('Cannot connect to Prowlarr; check URL, network and certificate') from None
         except (ValueError, ElementTree.ParseError):
             raise ProwlarrError(f'Prowlarr returned invalid {"XML" if torznab else "JSON"}') from None
+        except (HTTPException, OSError):
+            raise ProwlarrError('Prowlarr connection ended before the response was complete') from None
 
     def indexers(self):
         if self._indexers is None:
             resources = self.transport('api/v1/indexer')
             if not isinstance(resources, list):
                 raise ProwlarrError('Prowlarr returned an invalid indexer list')
-            statuses = self.transport('api/v1/indexerstatus')
+            try:
+                statuses = self.transport('api/v1/indexerstatus')
+            except ProwlarrError:
+                statuses = []
             blocked = {}
             if not isinstance(statuses, list):
-                raise ProwlarrError('Prowlarr returned an invalid indexer status list')
+                statuses = []
             for status in statuses:
                 until = status.get('disabledTill') if isinstance(status, dict) else None
                 if not until:
@@ -373,8 +323,10 @@ class Client:
             self._indexers = []
             self._cooldowns = []
             for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
                 identifier = integer(resource.get('id'))
-                if not isinstance(resource, dict) or not resource.get('enable') \
+                if not resource.get('enable') \
                         or resource.get('protocol') != 'torrent' \
                         or resource.get('supportsSearch') is False \
                         or identifier <= 0:
@@ -424,36 +376,21 @@ class Client:
             return urlunsplit((target.scheme, target.netloc, target.path, urlencode(query), target.fragment))
         return resolved
 
-    def resolve_proxy_magnet(self, uri, deadline=None, title=None):
-        """Resolve magnet redirects without sending the API key to another origin.
-
-        A `.torrent` response is converted to a magnet (like the Jackett addon
-        did) so playback no longer depends on tracker availability; on any
-        parsing failure the original proxy link is returned instead.
-        """
+    def resolve_proxy_magnet(self, uri, deadline=None):
+        """Resolve magnet redirects and leave .torrent metadata to Elementum."""
         if not self.is_download_proxy(urlsplit(uri)):
             return uri
         opener = build_opener(ProxyHandler({}), NoRedirect())
         current = uri
         if deadline is None:
-            deadline = monotonic() + min(10, self.timeout)
+            deadline = monotonic() + min(RESOLVE_BUDGET, self.timeout)
         for _ in range(3):
             remaining = deadline - monotonic()
             if remaining <= 0:
                 return None
             try:
-                with opener.open(Request(current), timeout=min(remaining, RESOLVE_LINK_CAP)) as response:
-                    if response.headers.get_content_type() == 'application/x-bittorrent':
-                        content = response.read(RESOLVE_TORRENT_MAX_BYTES + 1)
-                        if len(content) > RESOLVE_TORRENT_MAX_BYTES:
-                            return current
-                        digest = torrent_info_hash(content)
-                        if not digest:
-                            return current
-                        name = quote(title or '', safe='')
-                        suffix = f'&dn={name}' if name else ''
-                        return f'magnet:?xt=urn:btih:{digest}{suffix}'
-                    return None
+                with opener.open(Request(current), timeout=remaining) as response:
+                    return current if response.headers.get_content_type() == 'application/x-bittorrent' else None
             except HTTPError as error:
                 try:
                     location = error.headers.get('Location') if error.code in (301, 302, 303, 307, 308) else None
@@ -470,7 +407,7 @@ class Client:
                 if not self.is_download_proxy(urlsplit(target)):
                     return target if self.api_key not in unquote(target) else None
                 current = target
-            except (OSError, ValueError):
+            except (HTTPException, OSError, ValueError):
                 return None
         return None
 
@@ -504,15 +441,22 @@ class Client:
         'balanced': lambda item: item['seeds'] * 3 * (item['resolution'] or 1),
     }
 
-    def _search_indexer(self, indexer, kind, query):
+    def _search_indexer(self, indexer, kind, query, deadline):
         endpoint = f"api/v1/indexer/{integer(indexer['id'])}/newznab"
-        root = self.transport(endpoint, torznab_params(indexer, kind, query))
+        params = torznab_params(indexer, kind, query)
+        if self.transport == self._request:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise ProwlarrError('Prowlarr request timed out')
+            root = self._request(endpoint, params, timeout=remaining)
+        else:
+            root = self.transport(endpoint, params)
         return list(torznab_releases(root, indexer))
 
-    def _torznab_search(self, pool, indexers, kind, query, progress, counts=None):
+    def _torznab_search(self, pool, indexers, kind, query, progress, deadline):
         names = [str(indexer.get('name') or indexer['id']) for indexer in indexers]
         progress(0, 'indexers', ', '.join(names))
-        pending = {pool.submit(self._search_indexer, indexer, kind, query): name
+        pending = {pool.submit(self._search_indexer, indexer, kind, query, deadline): name
                    for indexer, name in zip(indexers, names)}
         releases = {}
         errors = {}
@@ -524,8 +468,6 @@ class Client:
                 errors[result] = error
             else:
                 progress(completed, 'indexer_results', name, len(releases[result]))
-                if counts is not None:
-                    counts[name] = len(releases[result])
             waiting = [pending[future] for future in pending
                        if future not in releases and future not in errors]
             progress(completed, 'requests', f'{completed}/{len(pending)}', ', '.join(waiting))
@@ -545,14 +487,17 @@ class Client:
         year = integer(metadata.get('year')) if kind == 'movie' else 0
         primary = [(title, year, season, episode) for title in titles]
         if season is not None and episode is not None and allow_season_pack:
-            # Season packs are searched for the primary title only: the
-            # alternative names would multiply requests without new packs.
-            primary.append((titles[0], 0, season, None))
+            primary.extend((title, 0, season, None) for title in titles)
         fallback = []
+        years = ()
         if season is not None:
-            years = (integer(metadata.get(key)) for key in ('year', 'season_year', 'show_year'))
-            fallback = [(titles[0], value, None, None) for value in dict.fromkeys(years) if value]
-            fallback.append((titles[0], 0, None, None))
+            years = tuple(dict.fromkeys(value for key in ('year', 'season_year', 'show_year')
+                                       if (value := integer(metadata.get(key)))))
+            fallback = [(title, value, None, None) for value in (*years, 0) for title in titles]
+        season_name = str(metadata.get('season_name') or '').strip().casefold()
+        if any(season_name in title.casefold() for title in titles):
+            season_name = ''
+        tv_metadata = (season_name, integer(metadata.get('absolute_number')), tuple(map(str, years)))
         indexers = self.indexers()
         if progress is None:
             def progress(*_args):
@@ -562,8 +507,7 @@ class Client:
         per_query = len(indexers)
         total = per_query * len(dict.fromkeys((*primary, *fallback)))
         requested = 0
-        first_query = primary[0]
-        first_counts = {}
+        search_deadline = monotonic() + self.timeout
         with ThreadPoolExecutor(max_workers=6) as pool:
             def fetch(query):
                 nonlocal requested
@@ -571,27 +515,22 @@ class Client:
                 def report(completed, event, *args):
                     progress(5 + 75 * (requested + completed) // total, event, *args)
 
-                # The alternative title only runs on indexers whose localized
-                # search returned too few releases; where the localized name
-                # already works the second request is redundant load.
-                skip = set()
-                if query is not first_query and first_counts:
-                    skip = {name for name, count in first_counts.items()
-                            if count >= ADAPTIVE_TITLE_THRESHOLD}
-                remaining = [indexer for indexer in indexers
-                             if (indexer.get('name') or str(indexer.get('id'))) not in skip]
-                if not remaining:
+                now = monotonic()
+                primary_left = max(1, len(primary) - requested // per_query)
+                remaining = search_deadline - now
+                if remaining <= 0:
+                    raise ProwlarrError('Prowlarr search timed out')
+                query_deadline = now + remaining / primary_left
+                try:
+                    return self._torznab_search(pool, indexers, kind, query, report, query_deadline)
+                finally:
                     requested += per_query
-                    return []
-                resources = self._torznab_search(
-                    pool, remaining, kind, query, report,
-                    counts=first_counts if query is first_query else None)
-                requested += len(remaining)
-                return resources
 
             candidates = self._search(
                 fetch, primary, kind=kind, season=season, episode=episode,
-                fallback_queries=fallback, allow_season_pack=allow_season_pack, dedup_by_hash=False, **filters,
+                fallback_queries=fallback, allow_season_pack=allow_season_pack, dedup_by_hash=False,
+                require_tv_marker=lambda query: query[2] is None or (episode is not None and query[3] is None),
+                tv_metadata=tv_metadata, **filters,
             )
             progress(82, 'filtering')
             rows = self._resolve_results(pool, candidates, self.result_limit(limit), progress)
@@ -601,35 +540,8 @@ class Client:
     def _resolve_results(self, pool, candidates, limit, progress=None):
         results = []
         identities = set()
-        # Spend the whole connection timeout resolving proxy links; the
-        # former fixed 10 s budget dropped entire proxy-only indexers.
-        deadline = monotonic() + self.timeout
-        # The same torrent found by two title queries arrives with two proxy
-        # URIs and often no info hash; content identity collapses the pair.
-        # Different providers stay separate releases.
-        unique = []
-        seen = set()
-        for result in candidates:
-            key = (result['provider'], result['name'], result['_size_bytes'])
-            if key not in seen:
-                seen.add(key)
-                unique.append(result)
-        # One row per release: the same torrent on several indexers keeps one
-        # line and lists every provider, like the Jackett addon did. A
-        # magnet-backed copy wins over a .torrent proxy link: playback then
-        # no longer depends on tracker availability.
-        groups = {}
-        for result in unique:
-            groups.setdefault((result['name'], result['_size_bytes']), []).append(result)
-        rows = []
-        for group in groups.values():
-            magnet = next((item for item in group if item['uri'].startswith('magnet:?')), None)
-            row = dict(magnet or group[0])
-            row['provider'] = ', '.join(item['provider'] for item in group)
-            row['seeds'] = max(item['seeds'] for item in group)
-            row['peers'] = max(item['peers'] for item in group)
-            rows.append(row)
-        bound = min(len(rows), limit * 2)
+        deadline = monotonic() + min(RESOLVE_BUDGET, self.timeout)
+        bound = min(len(candidates), limit * 2)
         batches = max(1, -(-bound // 6))
         # Bound work by the result limit. Try spare candidates when a proxy fails.
         for index in range(batches):
@@ -637,8 +549,8 @@ class Client:
                 break
             if progress is not None:
                 progress(85 + 10 * (index + 1) // batches, 'links', len(results), min(bound, limit))
-            batch = rows[index * 6:(index + 1) * 6]
-            urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline, result['name']), batch)
+            batch = candidates[index * 6:min((index + 1) * 6, bound)]
+            urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline), batch)
             for result, uri in zip(batch, urls):
                 if not uri:
                     continue
@@ -649,12 +561,12 @@ class Client:
                 identities.add(identity)
                 results.append({**result, 'uri': uri, 'info_hash': digest})
         if progress is not None:
-            progress(95, 'links_done', len(results), min(len(rows), limit))
-        if not results and rows:
+            progress(95, 'links_done', len(results), min(len(candidates), limit))
+        if not results and candidates:
             # Last resort: when every verified link failed (a throttled tracker
             # rejects the download), still hand the unverified proxy links to
             # Elementum - some may play later; empty results hide the search.
-            return rows[:limit]
+            return candidates[:limit]
         return results[:limit]
 
     @staticmethod
@@ -680,7 +592,8 @@ class Client:
     def _search(self, fetch, queries, kind='search', min_seeders=1, season=None, episode=None,
                 size_ranges=None, include_unknown_size=True, include_resolutions=None,
                 include_release_types=None, require_keywords='', exclude_keywords='',
-                sort_by='seeds', fallback_queries=(), allow_season_pack=False, dedup_by_hash=True):
+                sort_by='seeds', fallback_queries=(), allow_season_pack=False, dedup_by_hash=True,
+                require_tv_marker=None, tv_metadata=None):
         tv = kind in ('episode', 'season') and season is not None
         season = integer(season, -1)
         episode = integer(episode, -1) if kind == 'episode' else None
@@ -689,6 +602,8 @@ class Client:
         required = [word.strip().casefold() for word in require_keywords.split(',') if word.strip()]
         excluded = [word.strip().casefold() for word in exclude_keywords.split(',') if word.strip()]
         unique = {}
+        first_error = None
+        received = False
         primary = dict.fromkeys(queries)
         fallback = dict.fromkeys(fallback_queries)
         first_query = next(iter(primary), None)
@@ -698,16 +613,18 @@ class Client:
                 break
             try:
                 resources = fetch(query)
-            except ProwlarrError:
-                if unique:
-                    break
-                raise
+            except ProwlarrError as error:
+                if first_error is None:
+                    first_error = error
+                continue
+            received = True
+            require_marker = require_tv_marker(query) if require_tv_marker else query != first_query
             for resource in resources:
                 result = self.parse_release(resource)
                 if result is None or result['seeds'] < integer(min_seeders):
                     continue
                 if tv and not matches_tv(result['name'], season, episode,
-                                         kind == 'season' or allow_season_pack, query != first_query):
+                                         kind == 'season' or allow_season_pack, require_marker, tv_metadata):
                     continue
                 if include_resolutions is not None and result['resolution'] not in include_resolutions:
                     continue
@@ -727,4 +644,6 @@ class Client:
                 previous = unique.get(identity)
                 if previous is None or previous['seeds'] < result['seeds']:
                     unique[identity] = result
+        if first_error is not None and not received:
+            raise first_error
         return sorted(unique.values(), key=self.SORT_KEYS.get(sort_by, self.SORT_KEYS['seeds']), reverse=True)

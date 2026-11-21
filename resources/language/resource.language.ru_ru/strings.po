@@ -203,7 +203,3 @@ msgctxt "#32072"
 msgid "Paused by trackers: {}"
 msgstr "Трекеры в паузе: {}"
 
-msgctxt "#32073"
-msgid "Served from cache: {}"
-msgstr "Из кэша: {}"
-

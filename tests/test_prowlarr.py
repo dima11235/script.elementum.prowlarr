@@ -1,4 +1,3 @@
-import hashlib
 import importlib.util
 import io
 import json
@@ -128,36 +127,24 @@ class ProwlarrTests(unittest.TestCase):
             (97, 'sorting'),
         ], events)
 
-    def test_repeated_search_is_served_from_cache(self):
+    def test_repeated_search_uses_fresh_results(self):
         gui = Mock()
         settings = Mock()
         settings.getSettingInt.return_value = 0
-        settings.getSetting.return_value = ''
         settings.getSettingBool.return_value = False
-        settings.getLocalizedString.side_effect = {32064: 'Starting', 32073: 'Cached: {}'}.get
+        settings.getLocalizedString.return_value = 'Starting'
         addon_api = Mock()
         addon_api.Addon.return_value = settings
         with patch.dict(sys.modules, {'xbmc': Mock(), 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}):
             with patch.object(sys, 'path', sys.path[:]):
-                addon = load('addon_tested_cache', ROOT / 'addon.py')
+                addon = load('addon_tested_fresh_results', ROOT / 'addon.py')
         client = Mock()
         client.cooldowns.return_value = []
-        client.search_media.return_value = [{'name': 'Movie'}]
-        clock = Mock(return_value=100.0)
-        with patch.object(addon, 'client', return_value=client), \
-                patch.object(addon.time, 'monotonic', clock):
-            first = addon.search('Movie')
-            self.assertEqual(1, client.search_media.call_count)
-            second = addon.search('Movie')
-            self.assertEqual(1, client.search_media.call_count)
-            self.assertEqual('Cached: 1', gui.DialogProgressBG.return_value.update.call_args_list[-1].kwargs['message'])
-            clock.return_value = 400.0
-            third = addon.search('Movie')
-            self.assertEqual(2, client.search_media.call_count)
-        self.assertEqual([{'name': 'Movie'}], first)
-        self.assertEqual([{'name': 'Movie'}], second)
-        self.assertEqual([{'name': 'Movie'}], third)
-        self.assertIsNot(second, third)
+        client.search_media.side_effect = [[{'name': 'First'}], [{'name': 'Second'}]]
+        with patch.object(addon, 'client', return_value=client):
+            self.assertEqual([{'name': 'First'}], addon.search('Movie'))
+            self.assertEqual([{'name': 'Second'}], addon.search('Movie'))
+        self.assertEqual(2, client.search_media.call_count)
 
     def test_empty_results_are_not_cached(self):
         gui = Mock()
@@ -234,12 +221,9 @@ class ProwlarrTests(unittest.TestCase):
         client.cooldowns.return_value = ['RuTracker.org 12:31', '1337x 12:45']
         with patch.object(addon, 'client', return_value=client):
             self.assertEqual([], addon.search('Movie'))
-        gui.DialogProgressBG.return_value.update.assert_called_once_with(
-            100,
-            heading='Elementum Prowlarr | Paused: RuTracker.org 12:31, 1337x 12:45',
-            message='Paused: RuTracker.org 12:31, 1337x 12:45')
-        gui.Dialog.return_value.notification.assert_not_called()
-        xbmc_mock.sleep.assert_called_once_with(3000)
+        gui.Dialog.return_value.notification.assert_called_once_with(
+            'Elementum Prowlarr', 'Paused: RuTracker.org 12:31, 1337x 12:45', time=5000)
+        xbmc_mock.sleep.assert_not_called()
         client.search_media.assert_not_called()
 
     def test_torznab_movie_uses_typed_year_when_available(self):
@@ -261,23 +245,7 @@ class ProwlarrTests(unittest.TestCase):
             self.assertEqual(1, opener.open.call_count)
             self.assertEqual({}, opener.open.call_args.args[0].headers)
 
-    def test_proxy_torrent_file_becomes_a_magnet(self):
-        client, _ = self.client()
-        proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
-        content = b'd4:infod6:lengthi1e4:name4:Test6:pieces0:ee'
-        digest = hashlib.sha1(b'd6:lengthi1e4:name4:Test6:pieces0:e').hexdigest()
-        opener = Mock()
-        response = opener.open.return_value
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        response.headers.get_content_type.return_value = 'application/x-bittorrent'
-        response.read.return_value = content
-        with patch.object(api, 'build_opener', return_value=opener):
-            uri = client.resolve_proxy_magnet(proxy, title='Test Movie')
-        self.assertEqual(f'magnet:?xt=urn:btih:{digest}&dn=Test%20Movie', uri)
-        self.assertLessEqual(opener.open.call_args.kwargs['timeout'], api.RESOLVE_LINK_CAP)
-
-    def test_unparseable_torrent_falls_back_to_proxy_url(self):
+    def test_proxy_passes_torrent_url_without_loading_or_rewriting_metadata(self):
         client, _ = self.client()
         proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
         opener = Mock()
@@ -285,9 +253,10 @@ class ProwlarrTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         response.headers.get_content_type.return_value = 'application/x-bittorrent'
-        response.read.return_value = b'not-a-torrent'
         with patch.object(api, 'build_opener', return_value=opener):
             self.assertEqual(proxy, client.resolve_proxy_magnet(proxy))
+        response.read.assert_not_called()
+        self.assertLessEqual(opener.open.call_args.kwargs['timeout'], api.RESOLVE_BUDGET)
 
     def test_media_tries_another_source_with_same_hash_when_proxy_fails(self):
         digest = 'a' * 40
@@ -308,7 +277,7 @@ class ProwlarrTests(unittest.TestCase):
             result = client.search_media('Movie', limit=1)
         self.assertEqual([magnet], [item['uri'] for item in result])
 
-    def test_second_title_runs_only_where_localized_title_failed(self):
+    def test_second_title_runs_even_when_localized_title_returns_many_releases(self):
         item = ('<item><title>Movie 1080p WEB-DL</title>'
                 '<torznab:attr name="seeders" value="7"/></item>')
         requested = []
@@ -330,9 +299,9 @@ class ProwlarrTests(unittest.TestCase):
         payload = {'title': 'Movie', 'titles': {'ru': 'Фильм', 'en': 'Movie'}, 'year': 2001}
         client.search_media(payload, kind='movie', language='ru', limit=20)
         self.assertEqual(sorted(requested),
-                         [('21', 'Фильм 2001'), ('22', 'Movie 2001'), ('22', 'Фильм 2001')])
+                         [('21', 'Movie 2001'), ('21', 'Фильм 2001'), ('22', 'Movie 2001'), ('22', 'Фильм 2001')])
 
-    def test_same_torrent_from_two_title_queries_is_reported_once(self):
+    def test_links_without_hash_are_not_merged_by_title(self):
         client, _ = self.client()
         base = {'name': 'Movie 1080p WEB-DL', 'provider': 'Tracker', 'seeds': 5, 'peers': 7,
                 'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
@@ -343,12 +312,9 @@ class ProwlarrTests(unittest.TestCase):
         pool = Mock()
         pool.map = lambda function, batch: [function(item) for item in batch]
         result = client._resolve_results(pool, [base, two, different], limit=10)
-        self.assertEqual(2, len(result))
-        self.assertEqual(['Movie 1080p WEB-DL', 'Movie 720p HDTV'],
-                         sorted(item['name'] for item in result))
-        self.assertEqual('Tracker', result[0]['provider'])
+        self.assertEqual(3, len(result))
 
-    def test_same_release_on_two_providers_merges_into_one_row(self):
+    def test_different_hashes_with_same_name_and_size_remain_separate(self):
         client, _ = self.client()
         base = {'name': 'Movie 1080p WEB-DL', 'provider': 'RuTracker.org', 'seeds': 5, 'peers': 7,
                 'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
@@ -359,10 +325,7 @@ class ProwlarrTests(unittest.TestCase):
         pool = Mock()
         pool.map = lambda function, batch: [function(item) for item in batch]
         result = client._resolve_results(pool, [base, other], limit=10)
-        self.assertEqual(1, len(result))
-        self.assertEqual('RuTracker.org, 1337x', result[0]['provider'])
-        self.assertEqual(12, result[0]['seeds'])
-        self.assertEqual(20, result[0]['peers'])
+        self.assertEqual(['RuTracker.org', '1337x'], [item['provider'] for item in result])
 
     def test_failed_links_are_returned_as_last_resort(self):
         client, _ = self.client()
@@ -437,7 +400,7 @@ class ProwlarrTests(unittest.TestCase):
     def test_localized_titles(self):
         payload = {'title': 'Movie', 'titles': {'RU': 'Фильм', 'en': 'Movie'}, 'year': 2001}
         self.assertEqual(['Фильм 2001', 'Movie 2001'], api.search_queries(payload, 'movie', 'ru'))
-        self.assertEqual(['Movie 2001'], api.search_queries(payload, 'movie'))
+        self.assertEqual(['Movie 2001', 'Фильм 2001'], api.search_queries(payload, 'movie'))
 
     def test_search_covers_localized_and_english_titles(self):
         payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар', 'en': 'Interstellar'},
@@ -479,6 +442,34 @@ class ProwlarrTests(unittest.TestCase):
                           'Интерстеллар 2014', 'Интерстеллар 2014'])
         self.assertEqual({'21', '22'},
                          {endpoint.split('/')[3] for endpoint, _ in endpoints if '/newznab' in endpoint})
+
+    def test_media_keeps_english_result_after_russian_search_fails(self):
+        magnet = 'magnet:?xt=urn:btih:' + 'c' * 40
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return [None, {'id': 21, 'enable': True, 'protocol': 'torrent'}]
+            if endpoint == 'api/v1/indexerstatus':
+                raise api.ProwlarrError('Status temporarily unavailable')
+            if params['q'] == 'Фильм 2001':
+                raise api.ProwlarrError('Search timed out')
+            self.assertEqual('Movie 2001', params['q'])
+            return ElementTree.fromstring(
+                '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>'
+                f'<item><title>Movie</title><link>{magnet}</link>'
+                '<torznab:attr name="seeders" value="5"/></item></channel></rss>'
+            )
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        payload = {'title': 'Movie', 'titles': {'ru': 'Фильм'}, 'year': 2001}
+        self.assertEqual([magnet], [result['uri'] for result in client.search_media(payload, 'movie', 'ru')])
+
+    def test_episode_fallback_uses_absolute_number_and_season_name(self):
+        metadata = ('second arc', 15, ('2024',))
+        self.assertTrue(api.matches_tv('Show Second Arc', 2, 3, True, True, metadata))
+        self.assertTrue(api.matches_tv('Show 2024 [12 из 24] E12-E17', 2, 3, False, True, metadata))
+        self.assertFalse(api.matches_tv('Show 2023 E12-E17', 2, 3, False, True, metadata))
+        self.assertFalse(api.matches_tv('Show Second Arc S02E04', 2, 3, True, True, metadata))
 
     def test_download_proxy_authorized_once_and_not_external(self):
         client, _ = self.client()
@@ -638,8 +629,8 @@ class ProwlarrTests(unittest.TestCase):
 
     def test_english_title_fallback(self):
         payload = {'title': 'Фильм', 'titles': {'en': 'Movie', 'ru': 'Фильм'}}
-        self.assertEqual('Movie', api.title_from_payload(payload))
-        self.assertEqual('Фильм', api.title_from_payload(payload, 'ru'))
+        self.assertEqual('Movie', api.title_from_payload(payload, kind='movie'))
+        self.assertEqual('Фильм', api.title_from_payload(payload, 'ru', 'movie'))
 
     def test_movie_titles_prefer_localized_over_query(self):
         payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар', 'en': 'Interstellar'},
@@ -651,7 +642,7 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual('Interstellar', api.title_from_payload(payload, '', 'movie'))
         russian = {'title': 'Движение вверх', 'titles': {'en': 'Upward Motion'}, 'query': 'Upward Motion'}
         self.assertEqual('Движение вверх', api.title_from_payload(russian, 'ru', 'movie'))
-        self.assertEqual('Движение вверх', api.title_from_payload(russian, '', 'movie'))
+        self.assertEqual(['Upward Motion', 'Движение вверх'], api.search_titles(russian, '', 'movie'))
         self.assertEqual('Upward Motion', api.title_from_payload(russian, '', 'search'))
 
     def test_null_numeric_fields(self):
