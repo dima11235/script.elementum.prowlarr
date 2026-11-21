@@ -491,11 +491,21 @@ class Client:
         # Spend the whole connection timeout resolving proxy links; the
         # former fixed 10 s budget dropped entire proxy-only indexers.
         deadline = monotonic() + self.timeout
+        # The same torrent found by two title queries arrives with two proxy
+        # URIs and often no info hash; content identity collapses the pair.
+        # Different providers stay separate releases.
+        unique = []
+        seen = set()
+        for result in candidates:
+            key = (result['provider'], result['name'], result['_size_bytes'])
+            if key not in seen:
+                seen.add(key)
+                unique.append(result)
         # Bound work by the result limit. Try spare candidates when a proxy fails.
-        for start in range(0, min(len(candidates), limit * 2), 6):
+        for start in range(0, min(len(unique), limit * 2), 6):
             if len(results) >= limit:
                 break
-            batch = candidates[start:min(start + 6, limit * 2)]
+            batch = unique[start:min(start + 6, limit * 2)]
             urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline), batch)
             for result, uri in zip(batch, urls):
                 if not uri:

@@ -203,6 +203,22 @@ class ProwlarrTests(unittest.TestCase):
             result = client.search_media('Movie', limit=1)
         self.assertEqual([magnet], [item['uri'] for item in result])
 
+    def test_same_torrent_from_two_title_queries_is_reported_once(self):
+        client, _ = self.client()
+        base = {'name': 'Movie 1080p WEB-DL', 'provider': 'Tracker', 'seeds': 5, 'peers': 7,
+                'size': '1.00 GiB', '_size_bytes': 1024 ** 3, 'info_hash': '',
+                'resolution': 3, 'release_type': 8, 'category': 'web'}
+        one = {**base, 'uri': '/base/21/download?link=token-one'}
+        two = {**base, 'uri': '/base/21/download?link=token-two'}
+        different = {**base, 'name': 'Movie 720p HDTV', '_size_bytes': 700 * 1024 ** 2,
+                     'uri': '/base/21/download?link=token-three'}
+        pool = Mock()
+        pool.map = lambda function, batch: [function(item) for item in batch]
+        result = client._resolve_results(pool, [one, two, different], limit=10)
+        self.assertEqual(2, len(result))
+        self.assertEqual(['Movie 1080p WEB-DL', 'Movie 720p HDTV'],
+                         sorted(item['name'] for item in result))
+
     def test_no_enabled_indexer_is_reported(self):
         client = api.Client('http://prowlarr.example', 'synthetic', transport=Mock(return_value=[]))
         with self.assertRaisesRegex(api.ProwlarrError, 'No enabled torrent'):
