@@ -163,10 +163,6 @@ msgctxt "#32020"
 msgid "Connected. Enabled torrent indexers: {}"
 msgstr "Connected. Enabled torrent indexers: {}"
 
-msgctxt "#32021"
-msgid "Search failed. Check the connection and settings."
-msgstr "Search failed. Check the connection and settings."
-
 msgctxt "#32064"
 msgid "Getting indexers from Prowlarr…"
 msgstr "Getting indexers from Prowlarr…"
@@ -179,13 +175,21 @@ msgctxt "#32066"
 msgid "{}: releases found: {}"
 msgstr "{}: releases found: {}"
 
-msgctxt "#32067"
-msgid "{}: unavailable"
-msgstr "{}: unavailable"
-
 msgctxt "#32068"
-msgid "Checking download links…"
-msgstr "Checking download links…"
+msgid "Checking links: {}/{}"
+msgstr "Checking links: {}/{}"
+
+msgctxt "#32074"
+msgid "Search requests: {}/{}; waiting: {}"
+msgstr "Search requests: {}/{}; waiting: {}"
+
+msgctxt "#32075"
+msgid "Filtering results…"
+msgstr "Filtering results…"
+
+msgctxt "#32076"
+msgid "Sorting…"
+msgstr "Sorting…"
 
 msgctxt "#32072"
 msgid "Paused by trackers: {}"

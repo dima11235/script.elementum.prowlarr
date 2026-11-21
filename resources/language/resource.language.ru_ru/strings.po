@@ -163,10 +163,6 @@ msgctxt "#32020"
 msgid "Connected. Enabled torrent indexers: {}"
 msgstr "Подключение работает. Включённых torrent-индексаторов: {}"
 
-msgctxt "#32021"
-msgid "Search failed. Check the connection and settings."
-msgstr "Ошибка поиска. Проверьте подключение и настройки."
-
 msgctxt "#32064"
 msgid "Getting indexers from Prowlarr…"
 msgstr "Получаю список индексаторов Prowlarr…"
@@ -179,13 +175,21 @@ msgctxt "#32066"
 msgid "{}: releases found: {}"
 msgstr "{}: найдено раздач: {}"
 
-msgctxt "#32067"
-msgid "{}: unavailable"
-msgstr "{}: недоступен"
-
 msgctxt "#32068"
-msgid "Checking download links…"
-msgstr "Проверяю ссылки на раздачи…"
+msgid "Checking links: {}/{}"
+msgstr "Проверяю ссылки: {}/{}"
+
+msgctxt "#32074"
+msgid "Search requests: {}/{}; waiting: {}"
+msgstr "Поиск: {}/{}; ожидаем: {}"
+
+msgctxt "#32075"
+msgid "Filtering results…"
+msgstr "Фильтрую результаты…"
+
+msgctxt "#32076"
+msgid "Sorting…"
+msgstr "Сортирую…"
 
 msgctxt "#32072"
 msgid "Paused by trackers: {}"

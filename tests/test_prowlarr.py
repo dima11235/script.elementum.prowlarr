@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import io
 import json
@@ -119,7 +120,11 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual([
             (5, 'indexers', 'Slow, Fast'),
             (42, 'indexer_results', 'Fast', 1),
-            (80, 'indexer_error', 'Slow'),
+            (42, 'requests', '1/2', 'Slow'),
+            (80, 'requests', '2/2', ''),
+            (82, 'filtering'),
+            (95, 'links', 0, 0),
+            (97, 'sorting'),
         ], events)
 
     def test_repeated_search_is_served_from_cache(self):
@@ -152,12 +157,31 @@ class ProwlarrTests(unittest.TestCase):
         self.assertEqual([{'name': 'Movie'}], third)
         self.assertIsNot(second, third)
 
+    def test_empty_results_are_not_cached(self):
+        gui = Mock()
+        settings = Mock()
+        settings.getSettingInt.return_value = 0
+        settings.getSetting.return_value = ''
+        settings.getSettingBool.return_value = False
+        settings.getLocalizedString.side_effect = {32064: 'Starting'}.get
+        addon_api = Mock()
+        addon_api.Addon.return_value = settings
+        with patch.dict(sys.modules, {'xbmc': Mock(), 'xbmcgui': gui, 'xbmcaddon': addon_api, 'prowlarr': api}):
+            with patch.object(sys, 'path', sys.path[:]):
+                addon = load('addon_tested_empty', ROOT / 'addon.py')
+        client = Mock()
+        client.search_media.return_value = []
+        with patch.object(addon, 'client', return_value=client):
+            self.assertEqual([], addon.search('Movie'))
+            self.assertEqual([], addon.search('Movie'))
+        self.assertEqual(2, client.search_media.call_count)
+
     def test_progress_window_is_the_only_dialog(self):
         gui = Mock()
         settings = Mock()
         settings.getSettingInt.return_value = 0
         settings.getLocalizedString.side_effect = {
-            32064: 'Starting', 32065: 'Checking: {}', 32021: 'Failed',
+            32064: 'Starting', 32065: 'Checking: {}',
         }.get
         addon_api = Mock()
         addon_api.Addon.return_value = settings
@@ -177,10 +201,11 @@ class ProwlarrTests(unittest.TestCase):
             gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = api.ProwlarrError('Unavailable')
             self.assertEqual([], addon.search('Movie B'))
-            gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Unavailable')
+            gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = RuntimeError
             self.assertEqual([], addon.search('Movie C'))
-            gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Failed')
+            gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
+            gui.Dialog.return_value.notification.assert_not_called()
         self.assertEqual(3, gui.DialogProgressBG.return_value.close.call_count)
         gui.Dialog.return_value.notification.assert_not_called()
 
@@ -203,7 +228,23 @@ class ProwlarrTests(unittest.TestCase):
             self.assertEqual(1, opener.open.call_count)
             self.assertEqual({}, opener.open.call_args.args[0].headers)
 
-    def test_proxy_preserves_torrent_url(self):
+    def test_proxy_torrent_file_becomes_a_magnet(self):
+        client, _ = self.client()
+        proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
+        content = b'd4:infod6:lengthi1e4:name4:Test6:pieces0:ee'
+        digest = hashlib.sha1(b'd6:lengthi1e4:name4:Test6:pieces0:e').hexdigest()
+        opener = Mock()
+        response = opener.open.return_value
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.headers.get_content_type.return_value = 'application/x-bittorrent'
+        response.read.return_value = content
+        with patch.object(api, 'build_opener', return_value=opener):
+            uri = client.resolve_proxy_magnet(proxy, title='Test Movie')
+        self.assertEqual(f'magnet:?xt=urn:btih:{digest}&dn=Test%20Movie', uri)
+        self.assertLessEqual(opener.open.call_args.kwargs['timeout'], api.RESOLVE_LINK_CAP)
+
+    def test_unparseable_torrent_falls_back_to_proxy_url(self):
         client, _ = self.client()
         proxy = 'https://prowlarr.example/base/21/download?link=opaque&apikey=synthetic'
         opener = Mock()
@@ -211,6 +252,7 @@ class ProwlarrTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         response.headers.get_content_type.return_value = 'application/x-bittorrent'
+        response.read.return_value = b'not-a-torrent'
         with patch.object(api, 'build_opener', return_value=opener):
             self.assertEqual(proxy, client.resolve_proxy_magnet(proxy))
 

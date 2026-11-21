@@ -12,8 +12,9 @@ from prowlarr import Client, ProwlarrError, search_titles  # noqa: E402
 
 ADDON = xbmcaddon.Addon('script.elementum.prowlarr')
 ADDON_NAME = 'Elementum Prowlarr'
-PROGRESS_MESSAGES = {'indexers': 32065, 'cooldown': 32072, 'indexer_results': 32066,
-                     'indexer_error': 32067, 'links': 32068}
+PROGRESS_MESSAGES = {'indexers': 32065, 'cooldown': 32072, 'requests': 32074,
+                     'indexer_results': 32066, 'filtering': 32075, 'links': 32068,
+                     'sorting': 32076}
 # Elementum re-invokes the provider several times for one item; a short-lived
 # cache keeps those repeats from hammering trackers that rate-limit requests.
 CACHE_TTL_SECONDS = 150
@@ -90,17 +91,16 @@ def search(payload, kind='search'):
             require_keywords=ADDON.getSetting('require_keywords'),
             exclude_keywords=ADDON.getSetting('exclude_keywords'),
             sort_by=SORT_MODES[max(0, min(3, ADDON.getSettingInt('sort_by')))])
-        _cache[key] = (time.monotonic(), tuple(results))
-        for stale in [item for item, (saved, _) in _cache.items()
-                      if time.monotonic() - saved >= CACHE_TTL_SECONDS]:
-            _cache.pop(stale, None)
+        if results:
+            _cache[key] = (time.monotonic(), tuple(results))
+            for stale in [item for item, (saved, _) in _cache.items()
+                          if time.monotonic() - saved >= CACHE_TTL_SECONDS]:
+                _cache.pop(stale, None)
     except ProwlarrError as error:
         xbmc.log(f'Elementum Prowlarr: {error}', xbmc.LOGWARNING)
-        progress.update(100, message=str(error))
     except Exception as error:
         # Never log payloads, API keys, download URLs or raw exception messages.
         xbmc.log(f'Elementum Prowlarr: {type(error).__name__}', xbmc.LOGERROR)
-        progress.update(100, message=localize(32021))
     else:
         xbmc.log(f'Elementum Prowlarr: returned {len(results)} results', xbmc.LOGINFO)
         return results

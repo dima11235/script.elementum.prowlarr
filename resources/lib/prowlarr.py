@@ -3,11 +3,12 @@ import json
 import re
 import socket
 from base64 import b32decode
+from hashlib import sha1
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from time import monotonic
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xml.etree import ElementTree
 
@@ -49,6 +50,10 @@ RELEASE_CATEGORIES = (
 # already returned at least this many releases: those indexers clearly index
 # the localized name and the second request would only duplicate the load.
 ADAPTIVE_TITLE_THRESHOLD = 5
+# One proxy link must not consume the whole resolve budget: a hanging tracker
+# response would otherwise drop every result found on the other indexers.
+RESOLVE_LINK_CAP = 10
+RESOLVE_TORRENT_MAX_BYTES = 4 * 1024 * 1024
 
 
 def release_category(title):
@@ -65,6 +70,59 @@ def human_size(size):
         if value < 1024 or unit == 'TiB':
             return f'{value:.2f} {unit}'
         value /= 1024
+
+
+def _bdecode(data, position, spans):
+    char = data[position:position + 1]
+    if char == b'i':
+        end = data.find(b'e', position)
+        if end < 0:
+            raise ValueError('unterminated integer')
+        return int(data[position + 1:end]), position, end + 1
+    if char == b'l':
+        result = []
+        start = position
+        position += 1
+        while data[position:position + 1] != b'e':
+            value, _, position = _bdecode(data, position, spans)
+            result.append(value)
+        return result, start, position + 1
+    if char == b'd':
+        result = {}
+        start = position
+        position += 1
+        while data[position:position + 1] != b'e':
+            key, _, key_end = _bdecode(data, position, spans)
+            if not isinstance(key, bytes):
+                raise ValueError('dictionary keys must be byte strings')
+            value, value_start, value_end = _bdecode(data, key_end, spans)
+            result[key] = value
+            if key == b'info':
+                spans.append((value_start, value_end))
+            position = value_end
+        return result, start, position + 1
+    length_end = data.find(b':', position)
+    if length_end < 0:
+        raise ValueError('unterminated string length')
+    length = int(data[position:length_end])
+    start = length_end + 1
+    end = start + length
+    if length < 0 or end > len(data):
+        raise ValueError('string length out of bounds')
+    return data[start:end], start, end
+
+
+def torrent_info_hash(content):
+    """Return the bittorrent info hash of a .torrent file, or None."""
+    spans = []
+    try:
+        _bdecode(content, 0, spans)
+    except (ValueError, IndexError):
+        return None
+    if not spans:
+        return None
+    start, end = spans[0]
+    return sha1(content[start:end]).hexdigest()
 
 
 def search_titles(payload, language='', kind='search'):
@@ -362,8 +420,13 @@ class Client:
             return urlunsplit((target.scheme, target.netloc, target.path, urlencode(query), target.fragment))
         return resolved
 
-    def resolve_proxy_magnet(self, uri, deadline=None):
-        """Resolve magnet redirects without sending the API key to another origin."""
+    def resolve_proxy_magnet(self, uri, deadline=None, title=None):
+        """Resolve magnet redirects without sending the API key to another origin.
+
+        A `.torrent` response is converted to a magnet (like the Jackett addon
+        did) so playback no longer depends on tracker availability; on any
+        parsing failure the original proxy link is returned instead.
+        """
         if not self.is_download_proxy(urlsplit(uri)):
             return uri
         opener = build_opener(ProxyHandler({}), NoRedirect())
@@ -375,9 +438,18 @@ class Client:
             if remaining <= 0:
                 return None
             try:
-                with opener.open(Request(current), timeout=remaining) as response:
-                    # Elementum accepts .torrent URLs and uses the complete metadata.
-                    return current if response.headers.get_content_type() == 'application/x-bittorrent' else None
+                with opener.open(Request(current), timeout=min(remaining, RESOLVE_LINK_CAP)) as response:
+                    if response.headers.get_content_type() == 'application/x-bittorrent':
+                        content = response.read(RESOLVE_TORRENT_MAX_BYTES + 1)
+                        if len(content) > RESOLVE_TORRENT_MAX_BYTES:
+                            return current
+                        digest = torrent_info_hash(content)
+                        if not digest:
+                            return current
+                        name = quote(title or '', safe='')
+                        suffix = f'&dn={name}' if name else ''
+                        return f'magnet:?xt=urn:btih:{digest}{suffix}'
+                    return None
             except HTTPError as error:
                 try:
                     location = error.headers.get('Location') if error.code in (301, 302, 303, 307, 308) else None
@@ -446,11 +518,13 @@ class Client:
                 releases[result] = result.result()
             except ProwlarrError as error:
                 errors[result] = error
-                progress(completed, 'indexer_error', name)
             else:
                 progress(completed, 'indexer_results', name, len(releases[result]))
                 if counts is not None:
                     counts[name] = len(releases[result])
+            waiting = [pending[future] for future in pending
+                       if future not in releases and future not in errors]
+            progress(completed, 'requests', f'{completed}/{len(pending)}', ', '.join(waiting))
         if len(errors) == len(pending):
             raise errors[next(iter(pending))]
         # Preserve indexer order for releases with identical sort keys.
@@ -515,11 +589,12 @@ class Client:
                 fetch, primary, kind=kind, season=season, episode=episode,
                 fallback_queries=fallback, allow_season_pack=allow_season_pack, dedup_by_hash=False, **filters,
             )
-            if candidates:
-                progress(85, 'links')
-            return self._resolve_results(pool, candidates, self.result_limit(limit))
+            progress(82, 'filtering')
+            rows = self._resolve_results(pool, candidates, self.result_limit(limit), progress)
+            progress(97, 'sorting')
+            return rows
 
-    def _resolve_results(self, pool, candidates, limit):
+    def _resolve_results(self, pool, candidates, limit, progress=None):
         results = []
         identities = set()
         # Spend the whole connection timeout resolving proxy links; the
@@ -536,25 +611,30 @@ class Client:
                 seen.add(key)
                 unique.append(result)
         # One row per release: the same torrent on several indexers keeps one
-        # line and lists every provider, like the Jackett addon did.
-        merged = {}
-        order = []
+        # line and lists every provider, like the Jackett addon did. A
+        # magnet-backed copy wins over a .torrent proxy link: playback then
+        # no longer depends on tracker availability.
+        groups = {}
         for result in unique:
-            key = (result['name'], result['_size_bytes'])
-            if key not in merged:
-                merged[key] = result
-                order.append(key)
-            else:
-                combined = merged[key]
-                combined['provider'] += f', {result["provider"]}'
-                combined['seeds'] = max(combined['seeds'], result['seeds'])
-                combined['peers'] = max(combined['peers'], result['peers'])
+            groups.setdefault((result['name'], result['_size_bytes']), []).append(result)
+        rows = []
+        for group in groups.values():
+            magnet = next((item for item in group if item['uri'].startswith('magnet:?')), None)
+            row = dict(magnet or group[0])
+            row['provider'] = ', '.join(item['provider'] for item in group)
+            row['seeds'] = max(item['seeds'] for item in group)
+            row['peers'] = max(item['peers'] for item in group)
+            rows.append(row)
+        bound = min(len(rows), limit * 2)
+        batches = max(1, -(-bound // 6))
         # Bound work by the result limit. Try spare candidates when a proxy fails.
-        for start in range(0, min(len(order), limit * 2), 6):
+        for index in range(batches):
             if len(results) >= limit:
                 break
-            batch = [merged[key] for key in order[start:min(start + 6, limit * 2)]]
-            urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline), batch)
+            if progress is not None:
+                progress(85 + 10 * (index + 1) // batches, 'links', len(results), min(bound, limit))
+            batch = rows[index * 6:(index + 1) * 6]
+            urls = pool.map(lambda result: self.resolve_proxy_magnet(result['uri'], deadline, result['name']), batch)
             for result, uri in zip(batch, urls):
                 if not uri:
                     continue
