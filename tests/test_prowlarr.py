@@ -7,7 +7,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from time import monotonic
+from time import monotonic, sleep
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -95,6 +95,85 @@ class ProwlarrTests(unittest.TestCase):
                          tuple(results[0][key] for key in ('provider', 'seeds', 'peers', 'uri')))
         fetch.assert_any_call('api/v1/indexer/21/newznab', {'t': 'tvsearch', 'q': 'Show', 'season': 1, 'ep': 2})
         fetch.assert_any_call('api/v1/indexer/22/newznab', {'t': 'tvsearch', 'q': 'Show S01E02'})
+
+    def test_query_tokens_excludes_connectors_years_and_short_words(self):
+        self.assertEqual({'mcdonald', 'dodds'},
+                         api.query_tokens(('McDonald & Dodds', 2020, 1, None)))
+        self.assertEqual({'макдональд', 'доддс'}, api.query_tokens('Макдональд и доддс'))
+        self.assertEqual(set(), api.query_tokens('2020'))
+        self.assertEqual({'war'}, api.query_tokens('War.2026.S01'))
+
+    def test_search_rejects_releases_without_query_words(self):
+        client, _ = self.client([release(title='Movie 1080p WEB-DL'),
+                                 release(title='Totally Unrelated S01 720p')])
+        results = client.search(['Movie'], kind='movie')
+        self.assertEqual(['Movie 1080p WEB-DL'], [item['name'] for item in results])
+
+    def test_season_search_rejects_other_show_with_matching_season(self):
+        indexers = [{'id': 21, 'enable': True, 'protocol': 'torrent', 'name': 'First',
+                     'capabilities': {'tvSearchParams': ['q', 'season', 'ep']}}]
+        magnet = 'magnet:?xt=urn:btih:' + 'a' * 40
+        xml = f'''<rss><channel>
+            <item><title>McDonald.and.Dodds.S01.COMPLETE.720p.AMZN.WEBRip.x264</title>
+                <link>{magnet}</link>
+                <torznab:attr name="seeders" value="4"/>
+            </item>
+            <item><title>War.2026.S01.Complete.1080p.WEBRip.x265</title>
+                <link>{magnet}</link>
+                <torznab:attr name="seeders" value="30"/>
+            </item>
+        </channel></rss>'''
+
+        def transport(endpoint, params=None):
+            if endpoint == 'api/v1/indexer':
+                return indexers
+            if endpoint == 'api/v1/indexerstatus':
+                return []
+            return ElementTree.fromstring(xml.replace('<rss>', '<rss xmlns:torznab="http://torznab.com/schemas/2015/feed">', 1))
+
+        client = api.Client('http://prowlarr.example', 'synthetic', transport=transport)
+        results = client.search_media({'title': 'McDonald & Dodds', 'titles': {'en': 'McDonald & Dodds'},
+                                       'query': 'McDonald & Dodds', 'season': 1},
+                                      kind='season', language='', min_seeders=1,
+                                      allow_season_pack=True)
+        self.assertEqual(['McDonald.and.Dodds.S01.COMPLETE.720p.AMZN.WEBRip.x264'],
+                         [item['name'] for item in results])
+
+    def test_link_check_continues_past_a_slow_first_batch(self):
+        client, _ = self.client([])
+        candidates = []
+        for index in range(11):
+            candidates.append({'name': f'Item {index:02d}',
+                               'uri': f'magnet:?xt=urn:btih:{index:02d}' + 'a' * 38,
+                               'provider': 'Tracker', 'seeds': 1, 'peers': 1,
+                               'size': '1.00 GiB', '_size_bytes': 1024 ** 3,
+                               'info_hash': '', 'resolution': 0, 'release_type': 0,
+                               'category': 'unknown'})
+        slow_uri = 'https://proxy.example/21/download?file=slow'
+        checked = []
+
+        def fake_resolve(uri, deadline):
+            checked.append(uri)
+            if uri == slow_uri:
+                sleep(0.5)
+                return None
+            return uri
+
+        candidates.insert(0, {'name': 'Slow link', 'uri': slow_uri, 'provider': 'Tracker',
+                              'seeds': 1, 'peers': 1, 'size': '1.00 GiB',
+                              '_size_bytes': 1024 ** 3, 'info_hash': '',
+                              'resolution': 0, 'release_type': 0, 'category': 'unknown'})
+        client.resolve_proxy_magnet = fake_resolve
+        pool = ThreadPoolExecutor(max_workers=3)
+        try:
+            with patch.object(api, 'RESOLVE_BUDGET', 0.2):
+                survivors = client._resolve_results(pool, candidates, 50)
+        finally:
+            pool.shutdown(wait=False)
+        self.assertEqual(len(candidates), len(checked))
+        self.assertIn(slow_uri, checked)
+        self.assertEqual(sorted(item['uri'] for item in candidates if item['uri'] != slow_uri),
+                         sorted(item['uri'] for item in survivors))
 
     def test_progress_reports_fast_indexer_while_slow_indexer_is_pending(self):
         slow_can_finish = Event()
@@ -695,7 +774,16 @@ class ProwlarrTests(unittest.TestCase):
         ]]
         result = client.search(['Show S01E02'], kind='episode', season=1, episode=2,
                                fallback_queries=['Show'], allow_season_pack=True)
-        self.assertCountEqual(candidates[:4], [item['name'] for item in result])
+        self.assertCountEqual(candidates[:2], [item['name'] for item in result])
+        localized_client, localized_transport = self.client()
+        localized_client.indexers()
+        localized_transport.side_effect = [[], [
+            release(title=title, infoHash=f'{index:040x}')
+            for index, title in enumerate(candidates)
+        ]]
+        localized = localized_client.search(['Шоу S01E02'], kind='episode', season=1, episode=2,
+                                            fallback_queries=['Шоу'], allow_season_pack=True)
+        self.assertCountEqual(candidates[2:4], [item['name'] for item in localized])
 
     def test_season_search_does_not_treat_numbered_episodes_as_packs(self):
         client, _ = self.client([
@@ -704,7 +792,7 @@ class ProwlarrTests(unittest.TestCase):
             release(title='Show 1x02', infoHash='c' * 40),
             release(title='Show.S01E02-1080p', infoHash='d' * 40),
         ])
-        result = client.search(['Show S01'], kind='season', season=1)
+        result = client.search(['Шоу S01'], kind='season', season=1)
         self.assertEqual(['Шоу 1 сезон 1080p'], [item['name'] for item in result])
 
     def test_optional_search_error_keeps_primary_results(self):

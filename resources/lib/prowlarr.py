@@ -48,6 +48,34 @@ RELEASE_CATEGORIES = (
 
 RESOLVE_BUDGET = 10
 
+# Words that carry no meaning on their own, so they are ignored when a query
+# is matched against release names.
+CONNECTORS = frozenset(
+    {'a', 'an', 'the', 'and', 'und', 'et', 'der', 'die', 'das', 'des', 'of'})
+
+# Season and episode markers (S01, S01E02, E02-E04, 1x02) select releases by
+# number and must not act as title words.
+MARKER_TOKEN = re.compile(
+    r'^(?:s\d{1,3}(?:e\d{1,4}(?:-\d{1,4})?)?|e\d{1,4}(?:-\d{1,4})?'
+    r'|\d{1,3}x\d{1,4}(?:-\d{1,4})?)$', re.IGNORECASE)
+
+
+def query_tokens(query):
+    """Significant title words of a query for the relevance gate."""
+    title = query[0] if isinstance(query, tuple) else str(query)
+    words = re.split(r'[^0-9\w]+', title.casefold(), flags=re.UNICODE)
+    return {word for word in words if len(word) > 1 and not word.isdigit()
+            and word not in CONNECTORS and not MARKER_TOKEN.match(word)}
+
+
+def title_has_query_words(name, tokens):
+    """True when every significant query word appears in the release name."""
+    if not tokens:
+        return True
+    words = set(re.split(r'[^0-9\w]+', str(name).casefold(), flags=re.UNICODE))
+    return tokens <= words
+
+
 
 def completed_before(futures, deadline):
     try:
@@ -570,7 +598,7 @@ class Client:
     def _resolve_results(self, pool, candidates, limit, progress=None):
         results = []
         identities = set()
-        deadline = monotonic() + min(RESOLVE_BUDGET, self.timeout)
+        deadline = monotonic() + self.timeout
         if self.deadline is not None:
             deadline = min(deadline, self.deadline)
         bound = min(len(candidates), limit * 2)
@@ -579,11 +607,15 @@ class Client:
         for index in range(batches):
             if len(results) >= limit:
                 break
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            batch_deadline = monotonic() + min(RESOLVE_BUDGET, remaining)
             if progress is not None:
                 progress(85 + 10 * (index + 1) // batches, 'links', len(results), min(bound, limit))
             batch = candidates[index * 6:min((index + 1) * 6, bound)]
-            pending = [pool.submit(self.resolve_proxy_magnet, result['uri'], deadline) for result in batch]
-            ready = {future: future.result() for future in completed_before(pending, deadline)}
+            pending = [pool.submit(self.resolve_proxy_magnet, result['uri'], batch_deadline) for result in batch]
+            ready = {future: future.result() for future in completed_before(pending, batch_deadline)}
             for result, future in zip(batch, pending):
                 uri = ready.get(future)
                 if not uri:
@@ -645,6 +677,7 @@ class Client:
             broad = query not in primary
             if broad and unique:
                 break
+            tokens = query_tokens(query)
             try:
                 resources = fetch(query)
             except ProwlarrError as error:
@@ -656,6 +689,8 @@ class Client:
             for resource in resources:
                 result = self.parse_release(resource)
                 if result is None or result['seeds'] < integer(min_seeders):
+                    continue
+                if not title_has_query_words(result['name'], tokens):
                     continue
                 if tv and not matches_tv(result['name'], season, episode,
                                          kind == 'season' or allow_season_pack, require_marker, tv_metadata):
