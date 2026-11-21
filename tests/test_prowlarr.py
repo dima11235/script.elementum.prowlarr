@@ -122,12 +122,12 @@ class ProwlarrTests(unittest.TestCase):
             (80, 'indexer_error', 'Slow'),
         ], events)
 
-    def test_kodi_dialog_shows_count_and_closes_on_success_and_error(self):
+    def test_progress_window_is_the_only_dialog(self):
         gui = Mock()
         settings = Mock()
         settings.getSettingInt.return_value = 0
         settings.getLocalizedString.side_effect = {
-            32064: 'Starting', 32065: 'Checking: {}', 32069: 'Returned: {}',
+            32064: 'Starting', 32065: 'Checking: {}', 32021: 'Failed',
         }.get
         addon_api = Mock()
         addon_api.Addon.return_value = settings
@@ -144,10 +144,15 @@ class ProwlarrTests(unittest.TestCase):
             client.search_media.side_effect = search_media
             self.assertEqual([{'name': 'Movie'}], addon.search('Movie'))
             gui.DialogProgressBG.return_value.update.assert_called_once_with(5, message='Checking: Tracker')
-            gui.Dialog.return_value.notification.assert_called_once_with('Elementum Prowlarr', 'Returned: 1', time=4000)
+            gui.Dialog.return_value.notification.assert_not_called()
             client.search_media.side_effect = api.ProwlarrError('Unavailable')
             self.assertEqual([], addon.search('Movie'))
-        self.assertEqual(2, gui.DialogProgressBG.return_value.close.call_count)
+            gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Unavailable')
+            client.search_media.side_effect = RuntimeError
+            self.assertEqual([], addon.search('Movie'))
+            gui.DialogProgressBG.return_value.update.assert_any_call(100, message='Failed')
+        self.assertEqual(3, gui.DialogProgressBG.return_value.close.call_count)
+        gui.Dialog.return_value.notification.assert_not_called()
 
     def test_torznab_movie_uses_typed_year_when_available(self):
         movie = ('Movie', 2001, None, None)
@@ -394,6 +399,18 @@ class ProwlarrTests(unittest.TestCase):
         payload = {'title': 'Фильм', 'titles': {'en': 'Movie', 'ru': 'Фильм'}}
         self.assertEqual('Movie', api.title_from_payload(payload))
         self.assertEqual('Фильм', api.title_from_payload(payload, 'ru'))
+
+    def test_movie_titles_prefer_localized_over_query(self):
+        payload = {'title': 'Interstellar', 'titles': {'ru': 'Интерстеллар', 'en': 'Interstellar'},
+                   'query': 'Interstellar', 'year': 2014}
+        self.assertEqual('Интерстеллар', api.title_from_payload(payload, 'ru', 'movie'))
+        self.assertEqual(['Интерстеллар 2014'], api.search_queries(payload, 'movie', 'ru'))
+        self.assertEqual('Interstellar', api.title_from_payload(payload, 'ru', 'search'))
+        self.assertEqual('Interstellar', api.title_from_payload(payload, '', 'movie'))
+        russian = {'title': 'Движение вверх', 'titles': {'en': 'Upward Motion'}, 'query': 'Upward Motion'}
+        self.assertEqual('Движение вверх', api.title_from_payload(russian, 'ru', 'movie'))
+        self.assertEqual('Движение вверх', api.title_from_payload(russian, '', 'movie'))
+        self.assertEqual('Upward Motion', api.title_from_payload(russian, '', 'search'))
 
     def test_null_numeric_fields(self):
         client, _ = self.client()

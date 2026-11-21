@@ -69,14 +69,13 @@ def search(payload, kind='search'):
             sort_by=SORT_MODES[max(0, min(3, ADDON.getSettingInt('sort_by')))])
     except ProwlarrError as error:
         xbmc.log(f'Elementum Prowlarr: {error}', xbmc.LOGWARNING)
-        xbmcgui.Dialog().notification(ADDON_NAME, str(error), time=6000)
+        progress.update(100, message=str(error))
     except Exception as error:
         # Never log payloads, API keys, download URLs or raw exception messages.
         xbmc.log(f'Elementum Prowlarr: {type(error).__name__}', xbmc.LOGERROR)
-        xbmcgui.Dialog().notification(ADDON_NAME, localize(32021), time=6000)
+        progress.update(100, message=localize(32021))
     else:
         xbmc.log(f'Elementum Prowlarr: returned {len(results)} results', xbmc.LOGINFO)
-        xbmcgui.Dialog().notification(ADDON_NAME, localize(32069).format(len(results)), time=4000)
         return results
     finally:
         progress.close()

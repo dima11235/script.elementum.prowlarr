@@ -187,6 +187,3 @@ msgctxt "#32068"
 msgid "Checking download links…"
 msgstr "Проверяю ссылки на раздачи…"
 
-msgctxt "#32069"
-msgid "Results returned: {}"
-msgstr "Раздач передано в Elementum: {}"

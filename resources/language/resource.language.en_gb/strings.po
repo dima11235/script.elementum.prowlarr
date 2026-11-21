@@ -187,6 +187,3 @@ msgctxt "#32068"
 msgid "Checking download links…"
 msgstr "Checking download links…"
 
-msgctxt "#32069"
-msgid "Results returned: {}"
-msgstr "Results returned: {}"

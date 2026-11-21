@@ -62,7 +62,7 @@ def human_size(size):
         value /= 1024
 
 
-def title_from_payload(payload, language=''):
+def title_from_payload(payload, language='', kind='search'):
     if isinstance(payload, str):
         return payload.strip()
     titles = {str(key).lower(): value for key, value in (payload.get('titles') or {}).items()}
@@ -71,12 +71,22 @@ def title_from_payload(payload, language=''):
         english = original or titles.get('en')
     else:
         english = titles.get('en') or original
-    return str(payload.get('query') or titles.get(language.lower()) or english or
-               next(iter(titles.values()), '')).strip()
+    query = str(payload.get('query') or '').strip()
+    localized = str(titles.get(language.lower()) or '').strip() if language else ''
+    if kind == 'search':
+        return (query or localized or english or
+                next(iter(titles.values()), '')).strip()
+    # Movie and TV searches prefer the localized title over the Elementum
+    # query, matching the Jackett addon; trackers like RuTracker index
+    # localized names and return nothing for the query fallback. A non-Latin
+    # original title also beats its English translation there.
+    preferred_original = original if original and not original.isascii() else ''
+    return (localized or preferred_original or english or query or
+            next(iter(titles.values()), '')).strip()
 
 
 def search_queries(payload, kind='search', language='', season_fallback=False):
-    title = title_from_payload(payload, language)
+    title = title_from_payload(payload, language, kind)
     if not title:
         return []
     if isinstance(payload, str) or kind == 'search':
@@ -95,8 +105,8 @@ def search_queries(payload, kind='search', language='', season_fallback=False):
     return [season_query]
 
 
-def tv_fallback_queries(payload, language):
-    title = title_from_payload(payload, language)
+def tv_fallback_queries(payload, language, kind='episode'):
+    title = title_from_payload(payload, language, kind)
     years = dict.fromkeys(integer(payload.get(key)) for key in ('year', 'season_year', 'show_year'))
     return [f'{title} {year}' for year in years if year] + [title]
 
@@ -407,7 +417,7 @@ class Client:
 
     def search_media(self, payload, kind='search', language='', allow_season_pack=False, limit=50,
                      progress=None, **filters):
-        title = title_from_payload(payload, language)
+        title = title_from_payload(payload, language, kind)
         if not title:
             return []
         metadata = payload if isinstance(payload, dict) else {}
@@ -451,7 +461,9 @@ class Client:
     def _resolve_results(self, pool, candidates, limit):
         results = []
         identities = set()
-        deadline = monotonic() + min(10, self.timeout)
+        # Spend the whole connection timeout resolving proxy links; the
+        # former fixed 10 s budget dropped entire proxy-only indexers.
+        deadline = monotonic() + self.timeout
         # Bound work by the result limit. Try spare candidates when a proxy fails.
         for start in range(0, min(len(candidates), limit * 2), 6):
             if len(results) >= limit:
