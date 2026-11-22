@@ -17,6 +17,10 @@ from utils import notify, translation, get_icon_path, human_size, get_resolution
     set_setting
 
 
+RUTRACKER_RETRY_DELAY = 3
+RUTRACKER_RECOVERY_TIMEOUT = 12
+
+
 class Cap(Flag):
     QUERY = auto()
     SEASON = auto()
@@ -56,6 +60,7 @@ class Indexer:
     def __init__(self, root):
         self.id = int(root["id"])
         self.name = root.get("name") or str(self.id)
+        self.implementation = root.get("implementation")
         capabilities = root.get("capabilities") or {}
         tv_p = capabilities.get("tvSearchParams") or []
         movie_p = capabilities.get("movieSearchParams") or []
@@ -80,7 +85,10 @@ class IndexerResponseError(Exception):
 
 
 class IndexerRateLimited(Exception):
-    pass
+    def __init__(self, retry_after, cooldown=False):
+        super().__init__(retry_after)
+        self.retry_after = retry_after
+        self.cooldown = cooldown
 
 
 class ProwlarrClient:
@@ -106,21 +114,31 @@ class ProwlarrClient:
         if self.session is not None and not self.session.closed:
             await self.session.close()
 
-    async def send_request(self, url, params=None, json_response=False):
-        params = dict(params or {})
-        start = time.monotonic()
-        remaining = self.deadline - start if self.deadline is not None else 60
+    def request(self, method, url, **kwargs):
+        remaining = self.deadline - time.monotonic() if self.deadline is not None else 60
         if remaining <= 0:
             raise asyncio.TimeoutError
         timeout = aiohttp.ClientTimeout(total=min(60, remaining))
-        async with self.session.get(urljoin(self.host, url), params=params, timeout=timeout,
-                                    headers={'X-Api-Key': self.api_key},
-                                    allow_redirects=False) as resp:
+        return self.session.request(method, urljoin(self.host, url), timeout=timeout,
+                                    headers={'X-Api-Key': self.api_key}, allow_redirects=False, **kwargs)
+
+    async def send_request(self, url, params=None, json_response=False):
+        start = time.monotonic()
+        async with self.request('GET', url, params=dict(params or {})) as resp:
             log.debug(f"Indexers request status: {resp.status}")
             if resp.status != HTTPStatus.OK:
                 if resp.status == HTTPStatus.TOO_MANY_REQUESTS and not json_response:
                     retry_after = resp.headers.get('Retry-After', '')
-                    raise IndexerRateLimited(int(retry_after) if retry_after.isdecimal() else None)
+                    cooldown = False
+                    try:
+                        error = ElT.fromstring(await resp.text())
+                        description = error.get('description', '')
+                        cooldown = (error.tag == 'error' and error.get('code') == '429'
+                                    and description.startswith('Indexer is disabled till ')
+                                    and description.endswith(' due to recent failures.'))
+                    except (ElT.ParseError, UnicodeError, aiohttp.ClientError, asyncio.TimeoutError):
+                        pass
+                    raise IndexerRateLimited(int(retry_after) if retry_after.isdecimal() else None, cooldown)
                 if not json_response:
                     raise IndexerResponseError(resp.status)
                 self.proceed_resp_error(resp.status, f"Prowlarr HTTP {resp.status}")
@@ -265,8 +283,29 @@ class ProwlarrClient:
         query.append(('apikey', self.api_key))
         return urlunsplit((target.scheme, target.netloc, target.path, urlencode(query), target.fragment))
 
+    async def retry_rutracker(self, indexer, kind, query):
+        log.info(f'Waiting {RUTRACKER_RETRY_DELAY}s before Prowlarr Test for {indexer.name}')
+        await asyncio.sleep(RUTRACKER_RETRY_DELAY)
+        async with self.request('GET', f'{self.get_indexers_list}/{indexer.id}') as response:
+            if response.status != HTTPStatus.OK:
+                log.warning(f'Prowlarr definition for {indexer.name}: HTTP {response.status}')
+                return None
+            definition = await response.json()
+        if (not isinstance(definition, dict) or definition.get('id') != indexer.id
+                or definition.get('implementation') != 'RuTracker' or not definition.get('enable')):
+            return None
+
+        async with self.request('POST', f'{self.get_indexers_list}/test', json=definition) as response:
+            if response.status != HTTPStatus.OK:
+                log.warning(f'Prowlarr Test for {indexer.name}: HTTP {response.status}')
+                return None
+
+        log.info(f'Prowlarr Test passed for {indexer.name}; retrying search')
+        return await self.search_by_indexer(indexer, kind, *query)
+
     async def search_indexer(self, indexer, kind, queries, fallback):
         results = []
+        recovery_attempted = False
         for group in (queries, fallback):
             for query in group:
                 if self.deadline is not None and time.monotonic() >= self.deadline:
@@ -274,9 +313,23 @@ class ProwlarrClient:
                 try:
                     rows, _ = await self.search_by_indexer(indexer, kind, *query)
                 except IndexerRateLimited as error:
-                    retry_after = error.args[0]
-                    log.warning(f"Prowlarr search for {indexer.name}: HTTP 429, Retry-After={retry_after}")
-                    return results, indexer
+                    log.warning(f"Prowlarr search for {indexer.name}: HTTP 429, Retry-After={error.retry_after}")
+                    if recovery_attempted or indexer.implementation != 'RuTracker' or not error.cooldown:
+                        return results, indexer
+                    timeout = RUTRACKER_RECOVERY_TIMEOUT
+                    if self.deadline is not None:
+                        timeout = min(timeout, self.deadline - time.monotonic())
+                    if timeout <= RUTRACKER_RETRY_DELAY:
+                        return results, indexer
+                    recovery_attempted = True
+                    try:
+                        retry = await asyncio.wait_for(self.retry_rutracker(indexer, kind, query), timeout)
+                    except (asyncio.TimeoutError, aiohttp.ClientError, ValueError, IndexerRateLimited) as failure:
+                        log.warning(f'Prowlarr recovery for {indexer.name}: {type(failure).__name__}')
+                        return results, indexer
+                    if retry is None:
+                        return results, indexer
+                    rows, _ = retry
                 results.extend(rows)
             if len({item['name'] for item in results}) >= 3:
                 break

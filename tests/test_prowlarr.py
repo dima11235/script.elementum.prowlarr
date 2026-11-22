@@ -33,7 +33,7 @@ class _Addon:
     def getAddonInfo(self, key):
         return {'id': 'script.elementum.prowlarr', 'name': 'Elementum Prowlarr',
                 'path': str(ROOT), 'icon': '', 'profile': str(ROOT),
-                'version': '0.4.4'}[key]
+                'version': '0.4.5'}[key]
 
     def getSetting(self, key):
         return SETTINGS.get(key, '')
@@ -503,7 +503,9 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         async def respond(request):
             if request.path == '/api/v1/indexer':
                 return web.json_response([
-                    {'id': i, 'name': f'Tracker {i}', 'enable': True, 'protocol': 'torrent'} for i in (1, 2)
+                    {'id': 1, 'name': 'RuTracker.org', 'enable': True, 'protocol': 'torrent',
+                     'implementation': 'RuTracker'},
+                    {'id': 2, 'name': 'Tracker 2', 'enable': True, 'protocol': 'torrent'},
                 ])
             if request.path == '/api/v1/indexerstatus':
                 return web.json_response([])
@@ -549,6 +551,63 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other, cli.download_uri(other))
         self.assertEqual('https://prowlarr.example/base/1/download?apikey=synthetic',
                          cli.download_uri('1/download'))
+
+    async def test_rutracker_recovery_uses_test_only_for_prowlarr_cooldown(self):
+        definition = {'id': 31, 'name': 'RuTracker.org', 'enable': True, 'implementation': 'RuTracker',
+                      'capabilities': {'tvSearchParams': ['q', 'season', 'ep']},
+                      'fields': [{'name': 'password', 'value': '********'}]}
+        cooldown = 'Indexer is disabled till tomorrow due to recent failures.'
+        quota = 'User configurable Indexer Query Limit of 1 in last 24 hour(s) reached.'
+        calls = []
+
+        async def respond(request):
+            self.assertEqual('synthetic', request.headers.get('X-Api-Key'))
+            if request.path.endswith('/newznab'):
+                params = dict(request.query)
+                calls.append(params)
+                if retry_succeeds and params['q'] == 'English' and calls.count(params) == 2:
+                    return web.Response(text=(
+                        '<rss><channel><item><title>Recovered</title>'
+                        '<link>magnet:?xt=urn:btih:' + 'c' * 40 + '</link></item></channel></rss>'
+                    ))
+                return web.Response(status=429, headers={'Retry-After': '300'},
+                                    text=f'<error code="429" description="{description}"/>')
+            if request.method == 'GET' and request.path.endswith('/31'):
+                calls.append('definition')
+                return web.json_response(definition)
+            self.assertEqual('/base/api/v1/indexer/test', request.path)
+            self.assertEqual('POST', request.method)
+            self.assertEqual(definition, await request.json())
+            calls.append('test')
+            return web.Response(status=test_status)
+
+        app = web.Application()
+        app.router.add_route('*', '/base/api/v1/{path:.*}', respond)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        host, port = runner.addresses[0]
+        cli = client.ProwlarrClient(f'http://{host}:{port}/base', 'synthetic')
+        await cli.create_session()
+        self.addAsyncCleanup(cli.close_session)
+        cli.indexers = [client.Indexer(definition)]
+        english = {'t': 'tvsearch', 'q': 'English', 'season': '1', 'ep': '2'}
+        russian = dict(english, q='Русское')
+        cases = [
+            (cooldown, 200, True, [english, 'definition', 'test', english, russian], ['Recovered']),
+            (cooldown, 200, False, [english, 'definition', 'test', english], []),
+            (cooldown, 400, False, [english, 'definition', 'test'], []),
+            (quota, 200, False, [english], []),
+        ]
+        with patch.object(client, 'RUTRACKER_RETRY_DELAY', .01):
+            for description, test_status, retry_succeeds, expected_calls, expected_names in cases:
+                with self.subTest(description=description, test_status=test_status, retry_succeeds=retry_succeeds):
+                    calls.clear()
+                    results = await cli.search_tv(('English', 'Русское'), season=1, ep=2)
+                    self.assertEqual(expected_calls, calls)
+                    self.assertEqual(expected_names, [row['name'] for row in results])
 
 
 class ParseTests(unittest.TestCase):
